@@ -56,7 +56,7 @@
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/prashithshetty/sentinel.git
+git clone https://github.com/Prashithshetty/SENTINAL.git
 cd sentinel-scanner
 ```
 
