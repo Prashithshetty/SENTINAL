@@ -1,0 +1,71 @@
+# Core Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Database - Using SQLite for simplicity (no PostgreSQL dependency)
+sqlalchemy==2.0.23
+# psycopg2-binary==2.9.9  # Commented out - requires PostgreSQL
+# alembic==1.12.1  # Commented out for now
+
+# Task Queue - Simplified
+# celery==5.3.4  # Commented out for now
+# redis==5.0.1  # Commented out for now
+# flower==2.0.1  # Commented out for now
+
+# Security & Auth
+# python-jose[cryptography]==3.3.0  # Commented out for now
+# passlib[bcrypt]==1.7.4  # Commented out for now
+python-dotenv==1.0.0
+
+# Scanning Tools & Libraries
+python-nmap==0.7.1
+dnspython==2.4.2
+# sslyze==5.2.0  # Commented out - has complex dependencies
+requests==2.31.0
+beautifulsoup4==4.12.2
+# selenium==4.15.2  # Commented out - requires browser driver
+# webdriver-manager==4.0.1  # Commented out
+
+# OSINT & Reconnaissance
+# shodan==1.30.1  # Commented out - requires API key
+
+# Technology Detection
+# python-Wappalyzer==0.3.1  # Commented out - may have issues
+
+# Reporting
+jinja2==3.1.2
+# matplotlib==3.8.2  # Commented out for now
+# reportlab==4.0.7  # Commented out for now
+
+# WebSocket Support
+websockets==12.0
+# python-socketio==5.10.0  # Commented out for now
+
+# Rate Limiting
+slowapi==0.1.9
+
+# Utilities
+aiofiles==23.2.1
+httpx==0.25.2
+pyyaml==6.0.1
+click==8.1.7
+colorama==0.4.6
+tqdm==4.66.1
+
+# CVE Database
+# nvdlib==0.7.4  # Commented out - may have issues
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+
+# Additional security tools
+# paramiko==3.3.1  # Commented out for now
+python-whois==0.8.0  # For WHOIS lookups
+lxml==4.9.3  # For XML parsing
+
+# Additional required packages
+packaging==23.2  # For version parsing

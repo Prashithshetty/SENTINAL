@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SENTINEL Vulnerability Scanner</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .main-card {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        .scan-form {
+            margin-bottom: 30px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        input[type="text"],
+        select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus,
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .modules-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .module-checkbox {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        .module-checkbox:hover {
+            background: #e8e8e8;
+        }
+
+        .module-checkbox input {
+            margin-right: 8px;
+        }
+
+        .consent-group {
+            background: #fff3cd;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .consent-group label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+        }
+
+        .consent-group input {
+            margin-right: 10px;
+        }
+
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status-section {
+            margin-top: 30px;
+            padding-top: 30px;
+            border-top: 2px solid #e0e0e0;
+        }
+
+        .scan-status {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #e0e0e0;
+            border-radius: 15px;
+            overflow: hidden;
+            margin: 15px 0;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+        }
+
+        .results-section {
+            margin-top: 30px;
+        }
+
+        .vulnerability-card {
+            background: white;
+            border-left: 4px solid;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .vuln-critical { border-left-color: #dc3545; }
+        .vuln-high { border-left-color: #fd7e14; }
+        .vuln-medium { border-left-color: #ffc107; }
+        .vuln-low { border-left-color: #28a745; }
+        .vuln-info { border-left-color: #17a2b8; }
+
+        .vuln-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .vuln-title {
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+
+        .severity-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            color: white;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .severity-critical { background: #dc3545; }
+        .severity-high { background: #fd7e14; }
+        .severity-medium { background: #ffc107; color: #333; }
+        .severity-low { background: #28a745; }
+        .severity-info { background: #17a2b8; }
+
+        .vuln-description {
+            color: #666;
+            margin-bottom: 10px;
+            line-height: 1.5;
+        }
+
+        .vuln-remediation {
+            background: #f0f8ff;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .stat-label {
+            color: #666;
+            font-size: 0.9rem;
+            margin-top: 5px;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(0,0,0,.1);
+            border-radius: 50%;
+            border-top-color: #667eea;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
+
+        .success-message {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🛡️ SENTINEL Vulnerability Scanner</h1>
+            <p>Comprehensive security analysis for web applications</p>
+        </div>
+
+        <div class="main-card">
+            <form id="scanForm" class="scan-form">
+                <div class="form-group">
+                    <label for="target">Target URL or IP Address</label>
+                    <input type="text" id="target" name="target" placeholder="https://example.com" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="scanType">Scan Type</label>
+                    <select id="scanType" name="scanType">
+                        <option value="passive">Passive (Safe, No Exploitation)</option>
+                        <option value="active">Active (Moderate Testing)</option>
+                        <option value="aggressive">Aggressive (Deep Testing)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Scanner Modules</label>
+                    <div class="modules-grid">
+                        <label class="module-checkbox">
+                            <input type="checkbox" name="modules" value="http_scanner" checked>
+                            HTTP Security
+                        </label>
+                        <label class="module-checkbox">
+                            <input type="checkbox" name="modules" value="dns_enumeration" checked>
+                            DNS Enumeration
+                        </label>
+                        <label class="module-checkbox">
+                            <input type="checkbox" name="modules" value="content_discovery">
+                            Content Discovery
+                        </label>
+                        <label class="module-checkbox">
+                            <input type="checkbox" name="modules" value="info_disclosure" checked>
+                            Info Disclosure
+                        </label>
+                        <label class="module-checkbox">
+                            <input type="checkbox" name="modules" value="xss_scanner">
+                            XSS Scanner
+                        </label>
+                        <label class="module-checkbox">
+                            <input type="checkbox" name="modules" value="sql_injection">
+                            SQL Injection
+                        </label>
+                        <label class="module-checkbox">
+                            <input type="checkbox" name="modules" value="command_injection">
+                            Command Injection
+                        </label>
+                        <label class="module-checkbox">
+                            <input type="checkbox" name="modules" value="cve_mapper">
+                            CVE Mapper
+                        </label>
+                    </div>
+                </div>
+
+                <div class="consent-group" id="consentGroup" style="display: none;">
+                    <label>
+                        <input type="checkbox" id="consent" name="consent">
+                        <strong>⚠️ I confirm that I have permission to scan this target</strong>
+                    </label>
+                    <small>Active and aggressive scans may trigger security alerts. Only scan targets you own or have explicit permission to test.</small>
+                </div>
+
+                <button type="submit" class="btn btn-primary" id="scanButton">
+                    Start Security Scan
+                </button>
+            </form>
+
+            <div id="statusSection" class="status-section" style="display: none;">
+                <h2>Scan Status</h2>
+                <div class="scan-status">
+                    <div><strong>Scan ID:</strong> <span id="scanId"></span></div>
+                    <div><strong>Status:</strong> <span id="scanStatus"></span></div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressBar" style="width: 0%">0%</div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="resultsSection" class="results-section" style="display: none;">
+                <h2>Scan Results</h2>
+                
+                <div class="stats-grid" id="statsGrid">
+                    <!-- Stats will be inserted here -->
+                </div>
+
+                <h3>Vulnerabilities Found</h3>
+                <div id="vulnerabilitiesList">
+                    <!-- Vulnerabilities will be inserted here -->
+                </div>
+            </div>
+
+            <div id="messageArea"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        let currentScanId = null;
+        let statusCheckInterval = null;
+
+        // Handle scan type change
+        document.getElementById('scanType').addEventListener('change', function() {
+            const consentGroup = document.getElementById('consentGroup');
+            if (this.value === 'active' || this.value === 'aggressive') {
+                consentGroup.style.display = 'block';
+            } else {
+                consentGroup.style.display = 'none';
+                document.getElementById('consent').checked = false;
+            }
+        });
+
+        // Handle form submission
+        document.getElementById('scanForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(this);
+            const target = formData.get('target');
+            const scanType = formData.get('scanType');
+            const modules = Array.from(formData.getAll('modules'));
+            
+            // Check consent for active scans
+            if ((scanType === 'active' || scanType === 'aggressive') && !formData.get('consent')) {
+                showError('Please confirm you have permission to scan this target');
+                return;
+            }
+
+            // Validate modules
+            if (modules.length === 0) {
+                showError('Please select at least one scanner module');
+                return;
+            }
+
+            // Start scan
+            await startScan(target, scanType, modules);
+        });
+
+        async function startScan(target, scanType, modules) {
+            const scanButton = document.getElementById('scanButton');
+            scanButton.disabled = true;
+            scanButton.innerHTML = '<span class="loading"></span> Starting scan...';
+            
+            clearMessages();
+            hideResults();
+
+            try {
+                const response = await fetch(`${API_BASE}/api/v1/scans`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        target: target,
+                        scan_type: scanType,
+                        modules: modules,
+                        consent_confirmed: scanType !== 'passive'
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                currentScanId = data.scan_id;
+                
+                showSuccess(`Scan started successfully! ID: ${currentScanId}`);
+                showStatus();
+                startStatusChecking();
+                
+            } catch (error) {
+                showError(`Failed to start scan: ${error.message}`);
+            } finally {
+                scanButton.disabled = false;
+                scanButton.innerHTML = 'Start Security Scan';
+            }
+        }
+
+        function startStatusChecking() {
+            if (statusCheckInterval) {
+                clearInterval(statusCheckInterval);
+            }
+
+            statusCheckInterval = setInterval(async () => {
+                await checkScanStatus();
+            }, 2000);
+        }
+
+        async function checkScanStatus() {
+            if (!currentScanId) return;
+
+            try {
+                const response = await fetch(`${API_BASE}/api/v1/scans/${currentScanId}/status`);
+                const data = await response.json();
+                
+                updateStatus(data);
+                
+                if (data.status === 'completed') {
+                    clearInterval(statusCheckInterval);
+                    await fetchResults();
+                } else if (data.status === 'failed') {
+                    clearInterval(statusCheckInterval);
+                    showError('Scan failed. Please check the logs.');
+                }
+            } catch (error) {
+                console.error('Status check error:', error);
+            }
+        }
+
+        function updateStatus(data) {
+            document.getElementById('scanId').textContent = data.scan_id.substring(0, 8) + '...';
+            document.getElementById('scanStatus').textContent = data.status.toUpperCase();
+            
+            const progressBar = document.getElementById('progressBar');
+            progressBar.style.width = `${data.progress}%`;
+            progressBar.textContent = `${data.progress}%`;
+        }
+
+        async function fetchResults() {
+            try {
+                const response = await fetch(`${API_BASE}/api/v1/scans/${currentScanId}/results`);
+                const data = await response.json();
+                
+                displayResults(data);
+                showSuccess('Scan completed successfully!');
+            } catch (error) {
+                showError(`Failed to fetch results: ${error.message}`);
+            }
+        }
+
+        function displayResults(data) {
+            // Show results section
+            document.getElementById('resultsSection').style.display = 'block';
+            
+            // Display statistics
+            const statsGrid = document.getElementById('statsGrid');
+            statsGrid.innerHTML = `
+                <div class="stat-card">
+                    <div class="stat-value">${data.total_vulnerabilities}</div>
+                    <div class="stat-label">Total Vulnerabilities</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" style="color: #dc3545;">${data.vulnerabilities_by_severity.critical || 0}</div>
+                    <div class="stat-label">Critical</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" style="color: #fd7e14;">${data.vulnerabilities_by_severity.high || 0}</div>
+                    <div class="stat-label">High</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" style="color: #ffc107;">${data.vulnerabilities_by_severity.medium || 0}</div>
+                    <div class="stat-label">Medium</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" style="color: #28a745;">${data.vulnerabilities_by_severity.low || 0}</div>
+                    <div class="stat-label">Low</div>
+                </div>
+            `;
+            
+            // Display vulnerabilities
+            const vulnList = document.getElementById('vulnerabilitiesList');
+            vulnList.innerHTML = '';
+            
+            if (data.vulnerabilities && data.vulnerabilities.length > 0) {
+                data.vulnerabilities.forEach(vuln => {
+                    const vulnCard = document.createElement('div');
+                    vulnCard.className = `vulnerability-card vuln-${vuln.severity}`;
+                    vulnCard.innerHTML = `
+                        <div class="vuln-header">
+                            <div class="vuln-title">${vuln.name}</div>
+                            <span class="severity-badge severity-${vuln.severity}">${vuln.severity.toUpperCase()}</span>
+                        </div>
+                        <div class="vuln-description">${vuln.description}</div>
+                        ${vuln.remediation ? `<div class="vuln-remediation"><strong>Remediation:</strong> ${vuln.remediation}</div>` : ''}
+                    `;
+                    vulnList.appendChild(vulnCard);
+                });
+            } else {
+                vulnList.innerHTML = '<p>No vulnerabilities detected. The target appears to be secure!</p>';
+            }
+        }
+
+        function showStatus() {
+            document.getElementById('statusSection').style.display = 'block';
+        }
+
+        function hideResults() {
+            document.getElementById('resultsSection').style.display = 'none';
+        }
+
+        function showError(message) {
+            const messageArea = document.getElementById('messageArea');
+            messageArea.innerHTML = `<div class="error-message">${message}</div>`;
+        }
+
+        function showSuccess(message) {
+            const messageArea = document.getElementById('messageArea');
+            messageArea.innerHTML = `<div class="success-message">${message}</div>`;
+        }
+
+        function clearMessages() {
+            document.getElementById('messageArea').innerHTML = '';
+        }
+    </script>
+</body>
+</html>
