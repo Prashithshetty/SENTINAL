@@ -1,11 +1,20 @@
-"""Network Scanner Module using Nmap for port and service discovery."""
+"""Network Scanner Module with built-in fallback for when Nmap is not available."""
 
-import nmap
+# Try to import nmap, but don't fail if it's not available
+try:
+    import nmap
+    NMAP_AVAILABLE = True
+except ImportError:
+    NMAP_AVAILABLE = False
+
 import asyncio
 from typing import Dict, List, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import ipaddress
 import re
+import socket
+import concurrent.futures
+import ssl
 from ..base_module import (
     BaseScannerModule, 
     ScanConfig, 
@@ -16,14 +25,27 @@ from ..base_module import (
 )
 
 class NetworkScanner(BaseScannerModule):
-    """Network scanning module using Nmap."""
+    """Network scanning module that works with or without Nmap."""
     
     def __init__(self):
         super().__init__()
         self.name = "NetworkScanner"
-        self.description = "Performs network scanning for open ports and services using Nmap"
         self.scan_type = ScanType.ACTIVE
-        self.nm = nmap.PortScanner()
+        
+        # Check if we can use nmap
+        if NMAP_AVAILABLE:
+            try:
+                self.nm = nmap.PortScanner()
+                self.use_nmap = True
+                self.description = "Performs network scanning for open ports and services using Nmap"
+            except:
+                self.nm = None
+                self.use_nmap = False
+                self.description = "Performs network scanning using Python sockets (Nmap not available)"
+        else:
+            self.nm = None
+            self.use_nmap = False
+            self.description = "Performs network scanning using Python sockets (Nmap not installed)"
         
         # Common vulnerable ports
         self.vulnerable_ports = {
@@ -76,8 +98,13 @@ class NetworkScanner(BaseScannerModule):
         return bool(hostname_pattern.match(target)) if target else False
     
     async def scan(self, config: ScanConfig) -> ScanResult:
-        """Perform network scan using Nmap."""
-        started_at = datetime.utcnow()
+        """Perform network scan using Nmap or fallback to socket scanning."""
+        # Use socket-based scanning if nmap is not available
+        if not self.use_nmap:
+            return await self._scan_with_sockets(config)
+        
+        # Otherwise use nmap
+        started_at = datetime.now(timezone.utc)
         vulnerabilities = []
         errors = []
         warnings = []
@@ -376,3 +403,181 @@ class NetworkScanner(BaseScannerModule):
             pass
         
         return {}
+    
+    async def _scan_with_sockets(self, config: ScanConfig) -> ScanResult:
+        """Fallback socket-based scanning when Nmap is not available."""
+        started_at = datetime.now(timezone.utc)
+        vulnerabilities = []
+        errors = []
+        warnings = []
+        info = {"open_ports": [], "services": {}}
+        statistics = {
+            "total_ports_scanned": 0,
+            "open_ports": 0,
+            "closed_ports": 0,
+            "services_detected": 0,
+        }
+        
+        try:
+            # Extract hostname/IP
+            target = config.target
+            if target.startswith(('http://', 'https://')):
+                from urllib.parse import urlparse
+                parsed = urlparse(target)
+                target = parsed.hostname
+            
+            # Resolve to IP
+            try:
+                ip = socket.gethostbyname(target)
+                info['target_ip'] = ip
+                info['hostname'] = target
+            except socket.gaierror:
+                errors.append(f"Cannot resolve hostname: {target}")
+                return ScanResult(
+                    module_name=self.name,
+                    success=False,
+                    started_at=started_at,
+                    completed_at=datetime.now(timezone.utc),
+                    vulnerabilities=vulnerabilities,
+                    errors=errors,
+                    warnings=warnings,
+                    info=info,
+                    statistics=statistics
+                )
+            
+            # Determine which ports to scan
+            if config.scan_type == ScanType.PASSIVE:
+                ports_to_scan = [80, 443]  # Minimal scan
+            elif config.scan_type == ScanType.ACTIVE:
+                ports_to_scan = list(self.vulnerable_ports.keys())[:15]  # Top 15 common ports
+            else:  # AGGRESSIVE
+                ports_to_scan = list(range(1, 1001))  # Top 1000 ports
+            
+            # Scan ports
+            open_ports = await self._scan_ports_with_sockets(ip, ports_to_scan, config.timeout or 1)
+            
+            statistics['total_ports_scanned'] = len(ports_to_scan)
+            statistics['open_ports'] = len(open_ports)
+            statistics['closed_ports'] = len(ports_to_scan) - len(open_ports)
+            
+            # Detect services and check for vulnerabilities
+            for port in open_ports:
+                info['open_ports'].append(port)
+                
+                # Try to detect service
+                service = await self._detect_service_with_socket(ip, port)
+                if service:
+                    info['services'][port] = service
+                    statistics['services_detected'] += 1
+                
+                # Check for vulnerabilities using simplified port_info
+                port_info = {'name': service, 'state': 'open'}
+                vuln = self._check_port_vulnerability(port, port_info, ip)
+                if vuln:
+                    vulnerabilities.append(vuln)
+            
+            # Add warning that this is fallback mode
+            warnings.append("Using fallback socket scanning (Nmap not available). Install Nmap for more comprehensive scanning.")
+                
+        except Exception as e:
+            errors.append(f"Socket scan failed: {str(e)}")
+        
+        completed_at = datetime.now(timezone.utc)
+        
+        return ScanResult(
+            module_name=self.name,
+            success=len(errors) == 0,
+            started_at=started_at,
+            completed_at=completed_at,
+            vulnerabilities=vulnerabilities,
+            errors=errors,
+            warnings=warnings,
+            info=info,
+            statistics=statistics
+        )
+    
+    async def _scan_ports_with_sockets(self, host: str, ports: List[int], timeout: int = 1) -> List[int]:
+        """Scan multiple ports using sockets."""
+        open_ports = []
+        
+        # Use ThreadPoolExecutor for concurrent scanning
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+            # Create tasks for all ports
+            future_to_port = {
+                executor.submit(self._is_port_open_socket, host, port, timeout): port 
+                for port in ports
+            }
+            
+            # Collect results
+            for future in concurrent.futures.as_completed(future_to_port):
+                port = future_to_port[future]
+                try:
+                    if future.result():
+                        open_ports.append(port)
+                except:
+                    pass
+        
+        return sorted(open_ports)
+    
+    def _is_port_open_socket(self, host: str, port: int, timeout: int = 1) -> bool:
+        """Check if a single port is open using socket."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            result = sock.connect_ex((host, port))
+            sock.close()
+            return result == 0
+        except:
+            return False
+    
+    async def _detect_service_with_socket(self, host: str, port: int) -> str:
+        """Try to detect what service is running on a port using sockets."""
+        # First check if it's a known port
+        if port in self.vulnerable_ports:
+            service = self.vulnerable_ports[port][0]
+            
+            # Try to grab banner for verification
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                sock.connect((host, port))
+                
+                # Send a probe and get response for HTTP ports
+                if port in [80, 8080]:
+                    sock.send(b"GET / HTTP/1.0\r\n\r\n")
+                elif port in [443, 8443]:
+                    # HTTPS requires SSL
+                    context = ssl.create_default_context()
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    sock = context.wrap_socket(sock)
+                    sock.send(b"GET / HTTP/1.0\r\n\r\n")
+                
+                # Try to receive banner
+                try:
+                    banner = sock.recv(1024)
+                    sock.close()
+                    
+                    # Check banner patterns
+                    service_patterns = {
+                        b'SSH': 'SSH',
+                        b'220': 'FTP/SMTP',
+                        b'HTTP': 'HTTP',
+                        b'+OK': 'POP3',
+                        b'* OK': 'IMAP',
+                        b'mysql_native_password': 'MySQL',
+                        b'PostgreSQL': 'PostgreSQL',
+                    }
+                    
+                    for pattern, service_name in service_patterns.items():
+                        if pattern in banner:
+                            return f"{service} ({service_name} detected)"
+                except:
+                    pass
+                    
+            except:
+                pass
+            
+            return service
+        
+        return "Unknown"

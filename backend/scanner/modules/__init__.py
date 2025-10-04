@@ -22,10 +22,19 @@ SCANNER_MODULES = {
 
 # Try to import modules with external dependencies
 try:
+    # First check if nmap is available
+    import nmap
+    # If nmap is available, use the original scanner
     from .network_scanner import NetworkScanner
     SCANNER_MODULES["network_scanner"] = NetworkScanner
-except ImportError:
-    pass  # Nmap not installed
+except (ImportError, Exception) as e:
+    # Use alternative scanner that doesn't require nmap
+    try:
+        from .network_scanner_alternative import NetworkScanner
+        SCANNER_MODULES["network_scanner"] = NetworkScanner
+        print("Using alternative network scanner (nmap-free)")
+    except ImportError as e2:
+        print(f"Neither network scanner available: {e}, {e2}")
 
 try:
     from .ssl_scanner import SSLScanner
