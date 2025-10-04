@@ -1,3 +1,7 @@
+from backend.api.models import Scan, ScanModule, ScanVulnerability
+from sqlalchemy.orm import Session
+from backend.core.ai_analyzer import gemini_analyzer
+
 """Main FastAPI application for SENTINEL vulnerability scanner."""
 
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Query, Body
@@ -14,6 +18,11 @@ from backend.scanner.engine import scanner_engine
 from backend.scanner.base_module import ScanConfig, ScanType
 from backend.api.models import Scan, ScanModule, ScanVulnerability
 from sqlalchemy.orm import Session
+from backend.core.ai_analyzer import gemini_analyzer
+from backend.api.models import Scan, ScanModule, ScanVulnerability
+from sqlalchemy.orm import Session
+from backend.core.ai_analyzer import gemini_analyzer
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -145,7 +154,7 @@ async def create_scan(
         scan_type=scan_type,
         modules_requested=modules,
         config=config if config else {},
-        metadata=metadata if metadata else {}
+        scan_metadata=metadata if metadata else {}
     )
     db.add(db_scan)
     db.commit()
@@ -170,7 +179,9 @@ async def execute_scan_task(scan_id: str, db: Session):
         # Update database
         db_scan = db.query(Scan).filter(Scan.id == scan_id).first()
         if db_scan:
-            db_scan.status = scan_job.status
+            # Convert enum to string value for database
+            from backend.api.models.scan import ScanStatus
+            db_scan.status = ScanStatus(scan_job.status.value)
             db_scan.started_at = scan_job.started_at
             db_scan.completed_at = scan_job.completed_at
             db_scan.progress = scan_job.progress
@@ -221,7 +232,7 @@ async def execute_scan_task(scan_id: str, db: Session):
                     evidence=vuln.evidence,
                     remediation=vuln.remediation,
                     references=vuln.references,
-                    metadata=vuln.metadata
+                    vuln_metadata=vuln.metadata
                 )
                 db_vuln.calculate_risk_score()
                 db.add(db_vuln)
@@ -275,7 +286,7 @@ async def get_scan(scan_id: str, db: Session = Depends(get_db)):
             "target": scan_job.target,
             "status": scan_job.status.value,
             "progress": scan_job.progress,
-            "current_module": scan_job.current_module,
+            "current_module": getattr(scan_job, 'current_module', None),
             "started_at": scan_job.started_at.isoformat() if scan_job.started_at else None,
             "modules": scan_job.modules
         }

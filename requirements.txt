@@ -69,3 +69,6 @@ lxml==4.9.3  # For XML parsing
 
 # Additional required packages
 packaging==23.2  # For version parsing
+
+# AI Integration
+google-generativeai==0.8.3  # For Gemini 2.0 Flash integration

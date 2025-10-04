@@ -55,7 +55,7 @@ class Scan(Base):
     info_count = Column(Integer, default=0)
     
     # Metadata
-    metadata = Column(JSON, default={})
+    scan_metadata = Column('metadata', JSON, default={})  # Use 'metadata' as column name in DB
     errors = Column(JSON, default=[])
     
     # User/Tenant information (for multi-tenancy)
@@ -93,7 +93,7 @@ class Scan(Base):
             'info_count': self.info_count,
             'modules_requested': self.modules_requested,
             'config': self.config,
-            'metadata': self.metadata,
+            'metadata': self.scan_metadata,
             'errors': self.errors
         }
 
@@ -195,7 +195,7 @@ class ScanVulnerability(Base):
     fixed = Column(Boolean, default=False)
     
     # Metadata
-    metadata = Column(JSON, default={})
+    vuln_metadata = Column('metadata', JSON, default={})  # Use 'metadata' as column name in DB
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships
@@ -231,7 +231,7 @@ class ScanVulnerability(Base):
             'false_positive': self.false_positive,
             'verified': self.verified,
             'fixed': self.fixed,
-            'metadata': self.metadata,
+            'metadata': self.vuln_metadata,
             'timestamp': self.timestamp.isoformat() if self.timestamp else None
         }
     

@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     virustotal_api_key: Optional[str] = Field(default=None, env="VIRUSTOTAL_API_KEY")
     vulners_api_key: Optional[str] = Field(default=None, env="VULNERS_API_KEY")
     nvd_api_key: Optional[str] = Field(default=None, env="NVD_API_KEY")
+    gemini_api_key: Optional[str] = Field(default=None, env="GEMINI_API_KEY")
     
     # Storage
     reports_dir: Path = Field(default=Path("./reports"), env="REPORTS_DIR")
