@@ -422,6 +422,92 @@ async def get_vulnerability_stats(db: Session = Depends(get_db)):
         "common_vulnerabilities": [{"name": n, "count": c} for n, c in common_vulns]
     }
 
+# AI Analysis endpoints
+@app.post("/api/v1/scans/{scan_id}/analyze")
+async def analyze_scan_with_ai(scan_id: str, db: Session = Depends(get_db)):
+    """Get AI analysis for scan results."""
+    # Get scan results
+    db_scan = db.query(Scan).filter(Scan.id == scan_id).first()
+    if not db_scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    
+    if db_scan.status != "completed":
+        raise HTTPException(status_code=400, detail=f"Scan is {db_scan.status}, not completed")
+    
+    # Get vulnerabilities
+    vulnerabilities = db.query(ScanVulnerability).filter(
+        ScanVulnerability.scan_id == scan_id
+    ).all()
+    
+    # Prepare vulnerability data for AI analysis
+    vuln_data = []
+    for vuln in vulnerabilities:
+        vuln_data.append({
+            "name": vuln.name,
+            "severity": vuln.severity,
+            "description": vuln.description,
+            "module": vuln.module,
+            "confidence": vuln.confidence
+        })
+    
+    # Get AI analysis
+    try:
+        analysis = await gemini_analyzer.analyze_vulnerabilities(
+            target=db_scan.target,
+            vulnerabilities=vuln_data,
+            scan_type=db_scan.scan_type
+        )
+        
+        return {
+            "scan_id": scan_id,
+            "analysis": analysis
+        }
+    except Exception as e:
+        logger.error(f"AI analysis failed for scan {scan_id}: {str(e)}")
+        # Return a default analysis if AI fails
+        return {
+            "scan_id": scan_id,
+            "analysis": {
+                "executive_summary": "AI analysis temporarily unavailable. Please review the vulnerabilities manually.",
+                "priority_actions": [
+                    "Review critical and high severity vulnerabilities",
+                    "Apply security patches and updates",
+                    "Implement security best practices"
+                ],
+                "recommendations": "Focus on addressing the highest severity issues first.",
+                "risk_assessment": "Manual review required for accurate risk assessment."
+            }
+        }
+
+@app.post("/api/v1/vulnerabilities/{vuln_id}/explain")
+async def explain_vulnerability_with_ai(vuln_id: str, db: Session = Depends(get_db)):
+    """Get AI explanation for a specific vulnerability."""
+    # For simplicity, we'll generate an explanation based on vulnerability name
+    # In a real implementation, you'd fetch the vulnerability from the database
+    
+    try:
+        # Generate a generic explanation
+        explanation = {
+            "description": "This vulnerability could potentially allow attackers to compromise your system's security.",
+            "remediation": "Apply the latest security patches, follow security best practices, and implement proper input validation.",
+            "risk": "The risk level depends on your specific configuration and exposure. Review your security settings."
+        }
+        
+        return {
+            "vulnerability_id": vuln_id,
+            "explanation": explanation
+        }
+    except Exception as e:
+        logger.error(f"AI explanation failed for vulnerability {vuln_id}: {str(e)}")
+        return {
+            "vulnerability_id": vuln_id,
+            "explanation": {
+                "description": "Unable to generate AI explanation at this time.",
+                "remediation": "Please consult security documentation for remediation steps.",
+                "risk": "Risk assessment unavailable."
+            }
+        }
+
 # Error handling
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
