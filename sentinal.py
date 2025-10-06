@@ -8,10 +8,12 @@ from modules.dns_inspector import DNSInspector
 from modules.link_analyzer import LinkAnalyzer
 from modules.shodan_scanner import ShodanScanner
 from modules.report_generator import ReportGenerator
+from backend.scanner.engine import scanner_engine
 
 
 def print_menu():
     print("\n=== SENTINEL Tools ===")
+    print("10. Comprehensive Scan (Recon + Vulnerability Engine)")
     print("11. Shodan Search")
     print("12. DNS Inspector")
     print("13. Link Analyzer")
@@ -103,6 +105,56 @@ async def run_generate_report():
         print(f"Error: {e}")
 
 
+async def run_comprehensive_scan():
+    try:
+        url = input("Enter the target URL for comprehensive scan: ").strip()
+
+        # Stage 1: Recon/report (runs Browser, DNS, Link, Shodan)
+        checker = BrowserChecker()
+        inspector = DNSInspector()
+        analyzer = LinkAnalyzer()
+
+        api_key = os.getenv("SHODAN_API_KEY", "").strip()
+        shodan_scanner = ShodanScanner(api_key) if api_key else None
+
+        tasks = [
+            checker.check(url),
+            inspector.inspect(url),
+            analyzer.analyze(url),
+            shodan_scanner.scan(url) if shodan_scanner else asyncio.sleep(0, result={})
+        ]
+        browser_analysis, dns_analysis, link_analysis, shodan_analysis = await asyncio.gather(*tasks)
+
+        report_gen = ReportGenerator()
+        recon_report = report_gen.generate(
+            url=url,
+            link_analysis=link_analysis,
+            dns_analysis=dns_analysis,
+            browser_analysis=browser_analysis,
+            shodan_analysis=shodan_analysis if isinstance(shodan_analysis, dict) else {}
+        )
+
+        # Stage 2: Vulnerability engine
+        available = list(scanner_engine.get_available_modules().keys())
+        if not available:
+            vuln_results = {"error": "No scanner modules available"}
+        else:
+            scan_job = await scanner_engine.create_scan(target=url, modules=available)
+            completed = await scanner_engine.execute_scan(scan_job.id)
+            vuln_results = scanner_engine.get_scan_results(completed.id) or {"error": "No results"}
+
+        # Merge
+        final_report = {
+            "target": url,
+            "recon_report": recon_report,
+            "vulnerability_scan": vuln_results,
+        }
+
+        print(json.dumps(final_report, indent=2, default=str))
+    except Exception as e:
+        print(f"Error: {e}")
+
+
 async def main():
     while True:
         print_menu()
@@ -120,6 +172,8 @@ async def main():
             await run_browser_checker()
         elif choice == "15":
             await run_generate_report()
+        elif choice == "10":
+            await run_comprehensive_scan()
         else:
             print("Invalid choice. Please try again.")
 
