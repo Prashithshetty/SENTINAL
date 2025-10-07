@@ -42,7 +42,7 @@ class ShodanScanner:
             'php': ['5.', '7.0.', '7.1.', '7.2.']
         }
 
-    async def scan(self, url):
+    async def scan(self, domain):
         """
         Enhanced intelligence gathering about the target server using Shodan
         """
@@ -67,10 +67,9 @@ class ShodanScanner:
         }
 
         try:
-            # Extract domain from URL
-            domain = urlparse(url).netloc
+            # THE FIX: No need to parse the input again. It's already a domain.
             if not domain:
-                return {"error": "Invalid URL format"}
+                return {"error": "Invalid domain format"}
 
             # Resolve IP address with enhanced error handling
             ip = await self._resolve_domain(domain)

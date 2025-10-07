@@ -22,15 +22,13 @@ class DNSInspector:
             'dkim': 'v=DKIM1'
         }
 
-    async def inspect(self, url):
+    async def inspect(self, domain):
         """
-        Perform comprehensive DNS analysis of the given URL with enhanced checks
+        Perform comprehensive DNS analysis of the given domain with enhanced checks
         """
         try:
-            parsed_url = urlparse(url)
-            domain = parsed_url.netloc
             if not domain:
-                return {"error": "Invalid URL format"}
+                return {"error": "Invalid domain format"}
 
             # Gather all DNS information asynchronously with timeouts
             tasks = [
