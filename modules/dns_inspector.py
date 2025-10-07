@@ -22,6 +22,16 @@ class DNSInspector:
             'dkim': 'v=DKIM1'
         }
 
+    def _format_date(self, date_value):
+        """Format date values to ISO format for JSON serialization"""
+        if date_value is None:
+            return None
+        if isinstance(date_value, list):
+            return [d.isoformat() if hasattr(d, 'isoformat') else str(d) for d in date_value]
+        if hasattr(date_value, 'isoformat'):
+            return date_value.isoformat()
+        return str(date_value)
+
     async def inspect(self, domain):
         """
         Perform comprehensive DNS analysis of the given domain with enhanced checks
@@ -38,7 +48,8 @@ class DNSInspector:
                 self._get_ns_records(domain),
                 self._get_txt_records(domain),
                 self._get_whois_info(domain),
-                self._check_dnssec(domain)
+                self._check_dnssec(domain),
+                self._check_dmarc_record(domain)  # Add explicit DMARC check
             ]
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -53,6 +64,7 @@ class DNSInspector:
                 "txt_records": results[4] if not isinstance(results[4], Exception) else [],
                 "whois_info": results[5] if not isinstance(results[5], Exception) else {},
                 "dnssec": results[6] if not isinstance(results[6], Exception) else {"enabled": False},
+                "dmarc_record": results[7] if not isinstance(results[7], Exception) else None,
                 "analysis": {},
                 "risk_score": 0,
                 "warnings": [],
@@ -132,15 +144,32 @@ class DNSInspector:
         except Exception:
             return []
 
+    async def _check_dmarc_record(self, domain):
+        """Check for DMARC record at _dmarc subdomain"""
+        try:
+            dmarc_domain = f"_dmarc.{domain}"
+            loop = asyncio.get_event_loop()
+            records = await loop.run_in_executor(
+                self.executor,
+                lambda: [str(r) for r in self.resolver.resolve(dmarc_domain, 'TXT')]
+            )
+            # Find DMARC record
+            for record in records:
+                if 'v=DMARC1' in record or 'v=dmarc1' in record.lower():
+                    return record
+            return None
+        except Exception:
+            return None
+
     async def _get_whois_info(self, domain):
-        """Get WHOIS information"""
+        """Get WHOIS information with proper date formatting"""
         try:
             loop = asyncio.get_event_loop()
             whois_info = await loop.run_in_executor(self.executor, whois.whois, domain)
             return {
                 'registrar': whois_info.registrar,
-                'creation_date': str(whois_info.creation_date),
-                'expiration_date': str(whois_info.expiration_date),
+                'creation_date': self._format_date(whois_info.creation_date),
+                'expiration_date': self._format_date(whois_info.expiration_date),
                 'name_servers': whois_info.name_servers if isinstance(whois_info.name_servers, list) else []
             }
         except Exception:
@@ -186,15 +215,23 @@ class DNSInspector:
             recommendations.append("Configure MX records for email handling")
             risk_score += 10
 
-        # Check TXT records for SPF and DMARC
+        # Check TXT records for SPF
         txt_records_str = ' '.join(result['txt_records']).lower()
         if 'v=spf1' not in txt_records_str:
             warnings.append("No SPF record found")
             recommendations.append("Add SPF record to prevent email spoofing")
             risk_score += 15
-        if 'v=dmarc1' not in txt_records_str:
+        
+        # Check for DMARC - both in base domain TXT and _dmarc subdomain
+        has_dmarc = False
+        if 'v=dmarc1' in txt_records_str:
+            has_dmarc = True
+        elif result.get('dmarc_record'):
+            has_dmarc = True
+            
+        if not has_dmarc:
             warnings.append("No DMARC record found")
-            recommendations.append("Add DMARC record to enhance email security")
+            recommendations.append("Add DMARC record at _dmarc.yourdomain.com to enhance email security")
             risk_score += 15
 
         # Update result with analysis

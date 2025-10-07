@@ -75,21 +75,23 @@ class Settings(BaseSettings):
     @property
     def scan_modules(self) -> List[str]:
         """Get list of enabled scan modules based on feature flags."""
+        # Always enable core modules
         modules = [
-            "network_scanner",
-            "dns_enumeration",
-            "ssl_scanner",
             "http_scanner",
+            "dns_enumeration",
             "content_discovery",
             "info_disclosure",
+            "ssl_scanner",
+            "network_scanner",
         ]
         
-        if self.enable_injection_testing:
-            modules.extend([
-                "sql_injection",
-                "xss_scanner",
-                "command_injection",
-            ])
+        # Always include injection testing modules for comprehensive scans
+        # They will only run in ACTIVE/AGGRESSIVE mode anyway
+        modules.extend([
+            "sql_injection",
+            "xss_scanner",
+            "command_injection",
+        ])
         
         if self.enable_osint_modules:
             modules.append("osint_footprint")
