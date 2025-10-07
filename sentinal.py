@@ -8,11 +8,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Module Imports ---
-from modules.browser_checker import BrowserChecker
-from modules.dns_inspector import DNSInspector
-from modules.link_analyzer import LinkAnalyzer
-from modules.shodan_scanner import ShodanScanner
-from modules.report_generator import ReportGenerator
+from backend.scanner.modules.browser_checker import BrowserChecker
+from backend.scanner.modules.dns_inspector import DNSInspector
+from backend.scanner.modules.link_analyzer import LinkAnalyzer
+from backend.scanner.modules.shodan_scanner import ShodanScanner
+from backend.scanner.modules.report_generator import ReportGenerator
 # Import the existing scanner_engine INSTANCE, not the class
 from backend.scanner.engine import scanner_engine
 

@@ -8,6 +8,11 @@ from .info_disclosure import InfoDisclosureScanner
 from .xss_scanner import XSSScanner
 from .command_injection import CommandInjectionScanner
 from .sql_injection import SQLInjectionScanner
+from .browser_checker import BrowserChecker
+from .dns_inspector import DNSInspector
+from .link_analyzer import LinkAnalyzer
+from .report_generator import ReportGenerator
+from .shodan_scanner import ShodanScanner
 
 # Module registry - start with available modules
 SCANNER_MODULES = {
@@ -18,6 +23,11 @@ SCANNER_MODULES = {
     "xss_scanner": XSSScanner,
     "command_injection": CommandInjectionScanner,
     "sql_injection": SQLInjectionScanner,
+    "browser_checker": BrowserChecker,
+    "dns_inspector": DNSInspector,
+    "link_analyzer": LinkAnalyzer,
+    "report_generator": ReportGenerator,
+    "shodan_scanner": ShodanScanner,
 }
 
 # Try to import modules with external dependencies
@@ -62,5 +72,15 @@ __all__ = [
     "XSSScanner",
     "CommandInjectionScanner",
     "SQLInjectionScanner",
+    "BrowserChecker",
+    "DNSInspector",
+    "LinkAnalyzer",
+    "ReportGenerator",
+    "ShodanScanner",
+    # Add the other scanners here as well
+    "NetworkScanner",
+    "SSLScanner",
+    "CVEMapper",
+    "AuthenticatedScanner",
     "SCANNER_MODULES",
 ]
