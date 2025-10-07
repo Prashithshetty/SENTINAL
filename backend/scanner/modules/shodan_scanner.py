@@ -60,7 +60,7 @@ class ShodanScanner:
                 'technologies': []
             },
             'security_issues': [],
-            'exposure_score': 0,
+            'exposure_score': None,  # Changed from 0 to None (will be set only on success)
             'risk_factors': [],
             'recommendations': [],
             'raw_data': {}
@@ -69,12 +69,12 @@ class ShodanScanner:
         try:
             # THE FIX: No need to parse the input again. It's already a domain.
             if not domain:
-                return {"error": "Invalid domain format"}
+                return {"error": "Invalid domain format", "scan_status": "failed"}
 
             # Resolve IP address with enhanced error handling
             ip = await self._resolve_domain(domain)
             if not ip:
-                return {"error": "Could not resolve domain"}
+                return {"error": "Could not resolve domain", "scan_status": "failed"}
 
             result['ip'] = ip
             result['hostname'] = domain
@@ -99,18 +99,66 @@ class ShodanScanner:
             # Technology stack analysis
             self._analyze_technologies(host, result)
             
-            # Calculate exposure score
+            # Calculate exposure score (only on successful scan)
             self._calculate_exposure_score(result)
             
             # Generate security recommendations
             self._generate_recommendations(result)
+            
+            # Mark scan as successful
+            result['scan_status'] = 'success'
 
         except shodan.APIError as e:
-            result['error'] = f"Shodan API error: {str(e)}"
-            result['exposure_score'] = 100
+            error_str = str(e).lower()
+            
+            # Provide detailed error information based on the error type
+            if '401' in error_str or 'invalid api key' in error_str:
+                result['error'] = f"Shodan API error: Invalid API key"
+                result['error_details'] = "Your API key is not valid. Please check your .env file."
+                result['scan_status'] = 'failed'
+                result['exposure_score'] = None  # Don't set score on auth failure
+                
+            elif '403' in error_str or 'access denied' in error_str:
+                result['error'] = f"Shodan API error: Access denied (403 Forbidden)"
+                result['error_details'] = (
+                    f"Shodan denied access to IP {ip}. This is common for:\n"
+                    "  • Major tech companies (Google, Facebook, Amazon, etc.)\n"
+                    "  • Government/military infrastructure\n"
+                    "  • IPs flagged for protection\n"
+                    "  • Free API tier limitations"
+                )
+                result['scan_status'] = 'access_denied'
+                result['exposure_score'] = None  # Don't set score - we couldn't scan
+                result['suggestions'] = [
+                    "Try scanning a different target (e.g., your own server)",
+                    "Test with scanme.nmap.org (a legal test target)",
+                    "Check if your API plan supports this target",
+                    "Some targets are deliberately blocked by Shodan"
+                ]
+                
+            elif '404' in error_str or 'no information' in error_str:
+                result['error'] = f"Shodan API error: No information available"
+                result['error_details'] = f"IP {ip} is not indexed in Shodan's database yet."
+                result['scan_status'] = 'not_found'
+                result['exposure_score'] = 0  # Not found = no known exposure
+                
+            elif '429' in error_str or 'rate limit' in error_str:
+                result['error'] = f"Shodan API error: Rate limit exceeded"
+                result['error_details'] = "You've made too many requests. Wait a few minutes and try again."
+                result['scan_status'] = 'rate_limited'
+                result['exposure_score'] = None  # Don't set score on rate limit
+                
+            else:
+                result['error'] = f"Shodan API error: {str(e)}"
+                result['error_details'] = "An unexpected error occurred during the scan."
+                result['scan_status'] = 'failed'
+                result['exposure_score'] = None  # Don't set score on unknown error
+                
         except Exception as e:
             result['error'] = f"Scanning error: {str(e)}"
-            result['exposure_score'] = 100
+            result['error_details'] = "An unexpected error occurred during the scan."
+            result['scan_status'] = 'failed'
+            result['exposure_score'] = None  # Don't set score on exception
 
         return result
 
@@ -199,10 +247,10 @@ class ShodanScanner:
             # Analyze service configuration
             if 'product' in item:
                 service = {
-                    'name': item.get('product', ''),
-                    'version': item.get('version', ''),
-                    'port': item.get('port', ''),
-                    'protocol': item.get('transport', ''),
+                    'name': item.get('product', 'unknown'),
+                    'version': item.get('version', 'unknown'),
+                    'port': item.get('port', 0),
+                    'protocol': item.get('transport', 'unknown'),
                     'configuration': {}
                 }
                 
@@ -211,7 +259,9 @@ class ShodanScanner:
                     service['configuration'] = item['opts']
                     self._check_service_misconfigurations(service, result)
                 
-                result['server_info']['services'].append(service)
+                # Only append if we have meaningful service data
+                if service['name'] != 'unknown':
+                    result['server_info']['services'].append(service)
             
             # Analyze operating system information
             if 'os' in item:
@@ -293,10 +343,15 @@ class ShodanScanner:
 
     def _check_service_misconfigurations(self, service, result):
         """Check for common service misconfigurations"""
-        config = service['configuration']
+        config = service.get('configuration', {})
+        service_name = service.get('name', '').lower()
+        
+        # Skip if no service name
+        if not service_name or service_name == 'unknown':
+            return
         
         # Database misconfigurations
-        if service['name'].lower() in ['mysql', 'mongodb', 'redis']:
+        if service_name in ['mysql', 'mongodb', 'redis']:
             if not config.get('requires_auth', True):
                 result['security_issues'].append({
                     'type': 'misconfiguration',
@@ -306,7 +361,7 @@ class ShodanScanner:
                 })
         
         # SSH misconfigurations
-        if service['name'].lower() == 'openssh':
+        if service_name == 'openssh':
             if config.get('protocol_version', '2') == '1':
                 result['security_issues'].append({
                     'type': 'misconfiguration',
@@ -364,12 +419,15 @@ class ShodanScanner:
         
         # Service-based recommendations
         for service in result['server_info']['services']:
-            if service['name'].lower() in self.vulnerable_services:
+            service_name = service.get('name', '').lower()
+            service_version = service.get('version', 'unknown')
+            
+            if service_name in self.vulnerable_services:
                 recommendations.append({
                     'priority': 'medium',
                     'category': 'service',
-                    'title': f"Update {service['name']}",
-                    'description': f"Current version {service['version']} may be vulnerable",
+                    'title': f"Update {service.get('name', 'service')}",
+                    'description': f"Current version {service_version} may be vulnerable",
                     'details': 'Update to the latest stable version'
                 })
         
