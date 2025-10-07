@@ -15,6 +15,7 @@ from backend.scanner.modules.shodan_scanner import ShodanScanner
 from backend.scanner.modules.report_generator import ReportGenerator
 # Import the existing scanner_engine INSTANCE, not the class
 from backend.scanner.engine import scanner_engine
+from backend.scanner.base_module import ScanType, ScanConfig
 
 
 def extract_domain(url):
@@ -55,14 +56,62 @@ def normalize_url(url):
 def print_menu():
     """Prints the main menu for the toolkit."""
     print("\n--- Sentinel Security Toolkit ---")
-    print("10. Comprehensive Scan (Recon + Vulnerability Engine)")
-    print("11. Shodan Search")
-    print("12. DNS Inspector")
-    print("13. Link Analyzer")
-    print("14. Browser Checker")
-    print("15. Generate Report")
-    print("0. Exit")
+    print("0. Comprehensive Scan (All Modules)")
+    
+    # Dynamically list all available scanner modules
+    modules = list(scanner_engine.get_available_modules().keys())
+    for i, module_name in enumerate(modules):
+        print(f"{i + 1}. Run '{module_name}' Module")
 
+    # Add other tools
+    offset = len(modules) + 1
+    print(f"{offset}. Shodan Search")
+    print(f"{offset + 1}. DNS Inspector")
+    print(f"{offset + 2}. Link Analyzer")
+    print(f"{offset + 3}. Browser Checker")
+    print(f"{offset + 4}. Generate Report")
+    print(f"{offset + 5}. Exit")
+
+
+async def run_individual_module(module_name: str):
+    """Runs a single specified scanner module."""
+    try:
+        url = input(f"Enter the target URL for the '{module_name}' scan: ").strip()
+        normalized_url = normalize_url(url)
+        
+        if not normalized_url:
+            print("Error: Invalid URL format.")
+            return
+
+        print(f"\n[+] Starting '{module_name}' scan for: {normalized_url}")
+        print("-" * 40)
+
+        config = ScanConfig(
+            target=normalized_url,
+            scan_type=ScanType.ACTIVE,  # Run in active mode for thorough testing
+            timeout=3600,
+            rate_limit=1,
+            max_depth=3
+        )
+        
+        scan_job = await scanner_engine.create_scan(
+            target=normalized_url,
+            modules=[module_name],
+            config=config
+        )
+        
+        print(f"[*] Executing '{module_name}' module...")
+        completed_job = await scanner_engine.execute_scan(scan_job.id)
+        vulnerability_results = scanner_engine.get_scan_results(completed_job.id) or {"error": "Scan finished with no results."}
+        
+        print(json.dumps(vulnerability_results, indent=4, default=str))
+        print("-" * 40)
+        print(f"[+] '{module_name}' scan finished.")
+
+    except Exception as e:
+        print(f"Error running '{module_name}' scan: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def run_shodan_search():
     """Runs the Shodan search module."""
@@ -255,7 +304,6 @@ async def run_comprehensive_scan():
                 vulnerability_results = {"error": "No scanner modules available"}
             else:
                 # Create scan with ACTIVE type for comprehensive scanning
-                from backend.scanner.base_module import ScanType, ScanConfig
                 
                 config = ScanConfig(
                     target=normalized_url,
@@ -307,29 +355,41 @@ async def run_comprehensive_scan():
 
 async def main():
     """Main function to run the Sentinel tool."""
+    modules = list(scanner_engine.get_available_modules().keys())
+    offset = len(modules) + 1
+
     while True:
         print_menu()
         try:
             choice = input("Enter your choice: ").strip()
+            if not choice.isdigit():
+                print("Invalid choice. Please enter a number.")
+                continue
+            
+            choice = int(choice)
+
         except EOFError:
             print("\nGoodbye!")
             break
 
-        if choice == "0":
+        if choice == 0:
+            await run_comprehensive_scan()
+        elif 1 <= choice <= len(modules):
+            module_name = modules[choice - 1]
+            await run_individual_module(module_name)
+        elif choice == offset:
+            await run_shodan_search()
+        elif choice == offset + 1:
+            await run_dns_inspector()
+        elif choice == offset + 2:
+            await run_link_analyzer()
+        elif choice == offset + 3:
+            await run_browser_checker()
+        elif choice == offset + 4:
+            await run_generate_report()
+        elif choice == offset + 5:
             print("Goodbye!")
             break
-        elif choice == "10":
-            await run_comprehensive_scan()
-        elif choice == "11":
-            await run_shodan_search()
-        elif choice == "12":
-            await run_dns_inspector()
-        elif choice == "13":
-            await run_link_analyzer()
-        elif choice == "14":
-            await run_browser_checker()
-        elif choice == "15":
-            await run_generate_report()
         else:
             print("Invalid choice. Please try again.")
 
