@@ -2,6 +2,8 @@ import os
 import asyncio
 import json
 from urllib.parse import urlparse
+from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables from .env file at the very start
@@ -53,6 +55,59 @@ def normalize_url(url):
     return url
 
 
+def save_scan_result(result: dict, scan_type: str, target: str = None):
+    """
+    Saves the scan result to a JSON file with intelligent naming.
+    
+    Args:
+        result: The scan result dictionary
+        scan_type: Type of scan (e.g., 'comprehensive', 'shodan', 'dns', etc.)
+        target: Optional target URL/domain for better filename generation
+    """
+    try:
+        # Ensure the scan_results directory exists
+        results_dir = Path("scan_results")
+        results_dir.mkdir(exist_ok=True)
+        
+        # Generate filename based on available information
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Try to get scan_id from result
+        scan_id = result.get("id") or result.get("scan_id")
+        
+        if scan_id:
+            filename = f"{scan_id}_{scan_type}.json"
+        elif target:
+            # Clean target for filename (remove protocol, replace special chars)
+            clean_target = extract_domain(target) or target
+            clean_target = clean_target.replace(':', '_').replace('/', '_').replace('.', '_')
+            filename = f"{clean_target}_{scan_type}_{timestamp}.json"
+        else:
+            filename = f"{scan_type}_{timestamp}.json"
+        
+        file_path = results_dir / filename
+        
+        # Save the result with metadata
+        output = {
+            "scan_metadata": {
+                "scan_type": scan_type,
+                "timestamp": datetime.now().isoformat(),
+                "target": target
+            },
+            "results": result
+        }
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(output, f, indent=4, default=str)
+        
+        print(f"\n[+] Scan result saved to: {file_path}")
+        return str(file_path)
+        
+    except Exception as e:
+        print(f"\n[!] Error saving scan result: {e}")
+        return None
+
+
 def print_menu():
     """Prints the main menu for the toolkit."""
     print("\n--- Sentinel Security Toolkit ---")
@@ -69,8 +124,9 @@ def print_menu():
     print(f"{offset + 1}. DNS Inspector")
     print(f"{offset + 2}. Link Analyzer")
     print(f"{offset + 3}. Browser Checker")
-    print(f"{offset + 4}. Generate Report")
-    print(f"{offset + 5}. Exit")
+    print(f"{offset + 4}. Web Crawler")
+    print(f"{offset + 5}. Generate Report")
+    print(f"{offset + 6}. Exit")
 
 
 async def run_individual_module(module_name: str):
@@ -107,11 +163,15 @@ async def run_individual_module(module_name: str):
         print(json.dumps(vulnerability_results, indent=4, default=str))
         print("-" * 40)
         print(f"[+] '{module_name}' scan finished.")
+        
+        # Save the result
+        save_scan_result(vulnerability_results, f"module_{module_name}", normalized_url)
 
     except Exception as e:
         print(f"Error running '{module_name}' scan: {e}")
         import traceback
         traceback.print_exc()
+
 
 async def run_shodan_search():
     """Runs the Shodan search module."""
@@ -132,6 +192,10 @@ async def run_shodan_search():
         scanner = ShodanScanner(api_key)
         result = await scanner.scan(domain)
         print(json.dumps(result, indent=2, default=str))
+        
+        # Save the result
+        save_scan_result(result, "shodan", domain)
+        
     except Exception as e:
         print(f"Error: {e}")
 
@@ -149,6 +213,10 @@ async def run_dns_inspector():
         inspector = DNSInspector()
         result = await inspector.inspect(domain)
         print(json.dumps(result, indent=2, default=str))
+        
+        # Save the result
+        save_scan_result(result, "dns", domain)
+        
     except Exception as e:
         print(f"Error: {e}")
 
@@ -166,6 +234,10 @@ async def run_link_analyzer():
         analyzer = LinkAnalyzer()
         result = await analyzer.analyze(normalized_url)
         print(json.dumps(result, indent=2, default=str))
+        
+        # Save the result
+        save_scan_result(result, "link_analysis", normalized_url)
+        
     except Exception as e:
         print(f"Error: {e}")
 
@@ -183,8 +255,48 @@ async def run_browser_checker():
         checker = BrowserChecker()
         result = await checker.check(normalized_url)
         print(json.dumps(result, indent=2, default=str))
+        
+        # Save the result
+        save_scan_result(result, "browser_check", normalized_url)
+        
     except Exception as e:
         print(f"Error: {e}")
+
+
+async def run_web_crawler():
+    """Runs the web crawler to discover URLs."""
+    try:
+        url = input("Enter the starting URL to crawl: ").strip()
+        normalized_url = normalize_url(url)
+        
+        if not normalized_url:
+            print("Error: Invalid URL format")
+            return
+        
+        # Get crawl parameters
+        try:
+            max_depth = int(input("Enter maximum crawl depth (default: 3): ").strip() or "3")
+            max_urls = int(input("Enter maximum URLs to discover (default: 50): ").strip() or "50")
+        except ValueError:
+            print("Invalid input. Using defaults: depth=3, max_urls=50")
+            max_depth = 3
+            max_urls = 50
+        
+        crawler = LinkAnalyzer()
+        result = await crawler.crawl(normalized_url, max_depth=max_depth, max_urls=max_urls)
+        
+        print("\n" + "=" * 60)
+        print("CRAWL RESULTS")
+        print("=" * 60)
+        print(json.dumps(result, indent=2, default=str))
+        
+        # Save the result
+        save_scan_result(result, "crawl", normalized_url)
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 async def run_generate_report():
@@ -233,12 +345,16 @@ async def run_generate_report():
         )
 
         print(json.dumps(report, indent=2, default=str))
+        
+        # Save the report
+        save_scan_result(report, "combined_report", normalized_url)
+        
     except Exception as e:
         print(f"Error: {e}")
 
 
 async def run_comprehensive_scan():
-    """Runs a full reconnaissance and vulnerability scan against a target URL."""
+    """Runs a full reconnaissance and vulnerability scan with web crawling."""
     try:
         url = input("Enter the target URL for comprehensive scan (e.g., example.com or https://example.com): ").strip()
         normalized_url = normalize_url(url)
@@ -250,10 +366,34 @@ async def run_comprehensive_scan():
 
         print(f"\n[+] Starting Comprehensive Scan for: {normalized_url}")
         print(f"[+] Domain: {domain}")
-        print("-" * 40)
+        print("-" * 60)
 
-        # --- Stage 1: Run all reconnaissance modules concurrently ---
-        print("[*] Stage 1: Running reconnaissance modules (DNS, Shodan, Browser, Link)...")
+        # --- Stage 1: Web Crawling ---
+        print("[*] Stage 1: Web Crawling - Discovering URLs and endpoints...")
+        
+        try:
+            crawler = LinkAnalyzer()
+            crawl_result = await crawler.crawl(normalized_url, max_depth=3, max_urls=30)
+            discovered_urls = crawl_result.get('discovered_urls', [normalized_url])
+            urls_with_params = crawl_result.get('urls_with_parameters', [])
+            forms = crawl_result.get('forms', [])
+            
+            print(f"[+] Stage 1 Complete:")
+            print(f"    - Total URLs discovered: {len(discovered_urls)}")
+            print(f"    - URLs with parameters: {len(urls_with_params)}")
+            print(f"    - Forms found: {len(forms)}")
+            
+        except Exception as e:
+            print(f"[!] Stage 1: Crawling failed: {e}")
+            discovered_urls = [normalized_url]
+            urls_with_params = []
+            forms = []
+            crawl_result = {"error": str(e)}
+        
+        print("-" * 60)
+
+        # --- Stage 2: Run reconnaissance modules ---
+        print("[*] Stage 2: Running reconnaissance modules (DNS, Shodan, Browser, Link)...")
 
         browser_checker = BrowserChecker()
         dns_inspector = DNSInspector()
@@ -289,11 +429,12 @@ async def run_comprehensive_scan():
             shodan_analysis=shodan_analysis
         )
 
-        print("[+] Stage 1: Reconnaissance complete.")
-        print("-" * 40)
+        print("[+] Stage 2: Reconnaissance complete.")
+        print("-" * 60)
 
-        # --- Stage 2: Run the active vulnerability scanning engine ---
-        print("[*] Stage 2: Running active vulnerability scanners...")
+        # --- Stage 3: Run vulnerability scanners on discovered URLs ---
+        print("[*] Stage 3: Running active vulnerability scanners...")
+        print(f"[*] Testing {len(discovered_urls)} discovered URLs for vulnerabilities...")
 
         try:
             # Get all available modules
@@ -303,49 +444,90 @@ async def run_comprehensive_scan():
             if not available_modules:
                 vulnerability_results = {"error": "No scanner modules available"}
             else:
-                # Create scan with ACTIVE type for comprehensive scanning
+                # Prioritize URLs with parameters for injection testing
+                priority_urls = urls_with_params if urls_with_params else discovered_urls[:10]
                 
-                config = ScanConfig(
-                    target=normalized_url,
-                    scan_type=ScanType.ACTIVE,  # Use ACTIVE for comprehensive scan
-                    timeout=3600,
-                    rate_limit=1,  # 1 request per second
-                    max_depth=3
-                )
+                print(f"[*] Priority testing on {len(priority_urls)} URLs with parameters/forms")
                 
-                scan_job = await scanner_engine.create_scan(
-                    target=normalized_url, 
-                    modules=available_modules,
-                    config=config
-                )
+                all_vulnerabilities = []
+                scan_results_by_url = {}
                 
-                print(f"[*] Executing {len(available_modules)} scanner modules...")
-                completed_job = await scanner_engine.execute_scan(scan_job.id)
-                vulnerability_results = scanner_engine.get_scan_results(completed_job.id) or {"error": "Scan finished with no results."}
+                # Scan each discovered URL
+                for idx, test_url in enumerate(priority_urls, 1):
+                    print(f"[*] [{idx}/{len(priority_urls)}] Scanning: {test_url}")
+                    
+                    config = ScanConfig(
+                        target=test_url,
+                        scan_type=ScanType.ACTIVE,
+                        timeout=300,  # 5 minutes per URL
+                        rate_limit=1,
+                        max_depth=1  # Don't recurse for each URL
+                    )
+                    
+                    try:
+                        scan_job = await scanner_engine.create_scan(
+                            target=test_url,
+                            modules=available_modules,
+                            config=config
+                        )
+                        
+                        completed_job = await scanner_engine.execute_scan(scan_job.id)
+                        url_results = scanner_engine.get_scan_results(completed_job.id)
+                        
+                        if url_results:
+                            scan_results_by_url[test_url] = url_results
+                            # Collect vulnerabilities
+                            if 'vulnerabilities' in url_results:
+                                all_vulnerabilities.extend(url_results['vulnerabilities'])
+                    
+                    except Exception as e:
+                        print(f"[!] Error scanning {test_url}: {e}")
+                        scan_results_by_url[test_url] = {"error": str(e)}
+                
+                vulnerability_results = {
+                    "total_urls_scanned": len(priority_urls),
+                    "total_vulnerabilities_found": len(all_vulnerabilities),
+                    "vulnerabilities": all_vulnerabilities,
+                    "scan_results_by_url": scan_results_by_url
+                }
 
-            print("[+] Stage 2: Vulnerability scan complete.")
+            print(f"[+] Stage 3: Vulnerability scan complete.")
+            print(f"    - URLs scanned: {vulnerability_results.get('total_urls_scanned', 0)}")
+            print(f"    - Vulnerabilities found: {vulnerability_results.get('total_vulnerabilities_found', 0)}")
+            
         except Exception as e:
             vulnerability_results = {"error": f"Vulnerability scan failed: {str(e)}"}
-            print(f"[!] Stage 2: Vulnerability scan failed: {e}")
+            print(f"[!] Stage 3: Vulnerability scan failed: {e}")
             import traceback
             traceback.print_exc()
 
-        print("-" * 40)
+        print("-" * 60)
 
-        # --- Stage 3: Merge and present the final report ---
+        # --- Stage 4: Merge and present the final report ---
         print("\n[+] COMPREHENSIVE SCAN REPORT")
-        print("=" * 40)
+        print("=" * 60)
 
         final_report = {
             "target": normalized_url,
             "domain": domain,
+            "scan_timestamp": datetime.now().isoformat(),
+            "crawl_results": crawl_result,
             "reconnaissance_and_analysis": recon_report,
-            "active_vulnerability_scan": vulnerability_results
+            "active_vulnerability_scan": vulnerability_results,
+            "summary": {
+                "urls_discovered": len(discovered_urls),
+                "urls_with_parameters": len(urls_with_params),
+                "forms_found": len(forms),
+                "total_vulnerabilities": vulnerability_results.get('total_vulnerabilities_found', 0)
+            }
         }
 
         print(json.dumps(final_report, indent=4, default=str))
-        print("=" * 40)
+        print("=" * 60)
         print("[+] Comprehensive Scan Finished.")
+        
+        # Save the comprehensive scan result
+        save_scan_result(final_report, "comprehensive", normalized_url)
 
     except Exception as e:
         print(f"Error in comprehensive scan: {e}")
@@ -386,8 +568,10 @@ async def main():
         elif choice == offset + 3:
             await run_browser_checker()
         elif choice == offset + 4:
-            await run_generate_report()
+            await run_web_crawler()
         elif choice == offset + 5:
+            await run_generate_report()
+        elif choice == offset + 6:
             print("Goodbye!")
             break
         else:
