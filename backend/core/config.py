@@ -1,6 +1,6 @@
 """Configuration management for SENTINEL."""
 
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pydantic_settings import BaseSettings
 from pydantic import Field, validator
 import os
@@ -36,6 +36,36 @@ class Settings(BaseSettings):
     rate_limit_requests_per_minute: int = Field(default=60, env="RATE_LIMIT_REQUESTS_PER_MINUTE")
     max_scan_depth: int = Field(default=3, env="MAX_SCAN_DEPTH")
     
+    # Link Analyzer Configuration
+    link_analyzer_timeout: int = Field(default=10, env="LINK_ANALYZER_TIMEOUT")
+    link_analyzer_max_depth: int = Field(default=3, env="LINK_ANALYZER_MAX_DEPTH")
+    link_analyzer_max_urls: int = Field(default=50, env="LINK_ANALYZER_MAX_URLS")
+    link_analyzer_respect_robots: bool = Field(default=False, env="LINK_ANALYZER_RESPECT_ROBOTS")
+    link_analyzer_use_js_rendering: bool = Field(default=False, env="LINK_ANALYZER_USE_JS_RENDERING")
+    link_analyzer_integrate_with_scanners: bool = Field(default=False, env="LINK_ANALYZER_INTEGRATE_WITH_SCANNERS")
+    
+    # Crawler Configuration
+    crawler_user_agent: str = Field(default="SENTINEL-Crawler/1.0", env="CRAWLER_USER_AGENT")
+    crawler_delay_seconds: float = Field(default=0.5, env="CRAWLER_DELAY_SECONDS")
+    crawler_max_redirects: int = Field(default=10, env="CRAWLER_MAX_REDIRECTS")
+    crawler_verify_ssl: bool = Field(default=False, env="CRAWLER_VERIFY_SSL")
+    
+    # Browser Configuration
+    browser_headless: bool = Field(default=True, env="BROWSER_HEADLESS")
+    browser_timeout: int = Field(default=30000, env="BROWSER_TIMEOUT")
+    browser_wait_for_network_idle: bool = Field(default=True, env="BROWSER_WAIT_FOR_NETWORK_IDLE")
+    
+    # Vulnerability Testing Configuration
+    vulnerability_test_timeout: int = Field(default=10, env="VULNERABILITY_TEST_TIMEOUT")
+    open_redirect_test_enabled: bool = Field(default=True, env="OPEN_REDIRECT_TEST_ENABLED")
+    header_injection_test_enabled: bool = Field(default=True, env="HEADER_INJECTION_TEST_ENABLED")
+    crlf_injection_test_enabled: bool = Field(default=True, env="CRLF_INJECTION_TEST_ENABLED")
+    
+    # SSL Configuration
+    ssl_validation_timeout: int = Field(default=10, env="SSL_VALIDATION_TIMEOUT")
+    ssl_cert_expiry_warning_days: int = Field(default=30, env="SSL_CERT_EXPIRY_WARNING_DAYS")
+    ssl_weak_cipher_penalty: int = Field(default=10, env="SSL_WEAK_CIPHER_PENALTY")
+    
     # Security Settings
     require_consent: bool = Field(default=True, env="REQUIRE_CONSENT")
     allow_active_scanning: bool = Field(default=False, env="ALLOW_ACTIVE_SCANNING")
@@ -49,6 +79,9 @@ class Settings(BaseSettings):
     vulners_api_key: Optional[str] = Field(default=None, env="VULNERS_API_KEY")
     nvd_api_key: Optional[str] = Field(default=None, env="NVD_API_KEY")
     gemini_api_key: Optional[str] = Field(default=None, env="GEMINI_API_KEY")
+    google_safe_browsing_api_key: Optional[str] = Field(default=None, env="GOOGLE_SAFE_BROWSING_API_KEY")
+    urlscan_api_key: Optional[str] = Field(default=None, env="URLSCAN_API_KEY")
+    alienvault_otx_api_key: Optional[str] = Field(default=None, env="ALIENVAULT_OTX_API_KEY")
     
     # Storage
     reports_dir: Path = Field(default=Path("./reports"), env="REPORTS_DIR")
@@ -103,6 +136,20 @@ class Settings(BaseSettings):
             modules.append("authenticated_scanner")
         
         return modules
+    
+    @property
+    def reputation_api_keys(self) -> Dict[str, str]:
+        """Get dictionary of reputation API keys for LinkAnalyzer."""
+        keys = {}
+        if self.google_safe_browsing_api_key:
+            keys['google_safe_browsing'] = self.google_safe_browsing_api_key
+        if self.virustotal_api_key:
+            keys['virustotal'] = self.virustotal_api_key
+        if self.urlscan_api_key:
+            keys['urlscan'] = self.urlscan_api_key
+        if self.alienvault_otx_api_key:
+            keys['alienvault_otx'] = self.alienvault_otx_api_key
+        return keys
 
 # Create settings instance
 settings = Settings()

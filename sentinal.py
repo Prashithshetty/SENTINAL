@@ -18,6 +18,7 @@ from backend.scanner.modules.report_generator import ReportGenerator
 # Import the existing scanner_engine INSTANCE, not the class
 from backend.scanner.engine import scanner_engine
 from backend.scanner.base_module import ScanType, ScanConfig
+from backend.core.config import settings
 
 
 def extract_domain(url):
@@ -231,7 +232,9 @@ async def run_link_analyzer():
             print("Error: Invalid URL format")
             return
         
-        analyzer = LinkAnalyzer()
+        # Get API keys from settings
+        api_keys = settings.reputation_api_keys
+        analyzer = LinkAnalyzer(api_keys=api_keys)
         result = await analyzer.analyze(normalized_url)
         print(json.dumps(result, indent=2, default=str))
         
@@ -282,7 +285,9 @@ async def run_web_crawler():
             max_depth = 3
             max_urls = 50
         
-        crawler = LinkAnalyzer()
+        # Get API keys from settings
+        api_keys = settings.reputation_api_keys
+        crawler = LinkAnalyzer(api_keys=api_keys)
         result = await crawler.crawl(normalized_url, max_depth=max_depth, max_urls=max_urls)
         
         print("\n" + "=" * 60)
@@ -313,7 +318,9 @@ async def run_generate_report():
         # Initialize modules
         checker = BrowserChecker()
         inspector = DNSInspector()
-        analyzer = LinkAnalyzer()
+        # Get API keys from settings
+        api_keys = settings.reputation_api_keys
+        analyzer = LinkAnalyzer(api_keys=api_keys)
         report_gen = ReportGenerator()
 
         # Shodan requires API key; handle gracefully if missing
@@ -372,7 +379,9 @@ async def run_comprehensive_scan():
         print("[*] Stage 1: Web Crawling - Discovering URLs and endpoints...")
         
         try:
-            crawler = LinkAnalyzer()
+            # Get API keys from settings
+            api_keys = settings.reputation_api_keys
+            crawler = LinkAnalyzer(api_keys=api_keys)
             crawl_result = await crawler.crawl(normalized_url, max_depth=3, max_urls=30)
             discovered_urls = crawl_result.get('discovered_urls', [normalized_url])
             urls_with_params = crawl_result.get('urls_with_parameters', [])
@@ -397,7 +406,9 @@ async def run_comprehensive_scan():
 
         browser_checker = BrowserChecker()
         dns_inspector = DNSInspector()
-        link_analyzer = LinkAnalyzer()
+        # Get API keys from settings
+        api_keys = settings.reputation_api_keys
+        link_analyzer = LinkAnalyzer(api_keys=api_keys)
         report_generator = ReportGenerator()
 
         shodan_api_key = os.getenv("SHODAN_API_KEY")
