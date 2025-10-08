@@ -251,7 +251,12 @@ class VulnerabilityProber:
         self.timeout = 10
         
     async def check_open_redirect(self, url: str) -> Dict[str, Any]:
-        """Check for open redirect vulnerabilities"""
+        """
+        Check for open redirect vulnerabilities.
+        
+        FIXED: Only reports TRUE vulnerabilities where the site actually redirects
+        to attacker-controlled domains, not just accepting redirect parameters.
+        """
         results = {
             'vulnerable': False,
             'tested_parameters': [],
@@ -265,56 +270,97 @@ class VulnerabilityProber:
             
             # Common redirect parameters
             redirect_params = ['url', 'redirect', 'next', 'return', 'goto', 'redir', 
-                             'destination', 'continue', 'return_to', 'callback']
+                               'destination', 'continue', 'return_to', 'callback', 'target']
             
             # Test payloads
             test_payloads = [
                 'https://evil.com',
                 '//evil.com',
-                '///evil.com',
                 'https://evil.com@legitimate.com',
-                'javascript:alert(1)'
             ]
             
             for param in redirect_params:
-                if param in query_params or not query_params:
-                    results['tested_parameters'].append(param)
+                # Only test if parameter already exists OR if we're testing common params
+                if param not in query_params and query_params:
+                    continue  # Skip if param doesn't exist and URL has other params
+                
+                results['tested_parameters'].append(param)
+                
+                for payload in test_payloads:
+                    # Build test URL
+                    test_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+                    if query_params:
+                        # Replace existing parameter value
+                        test_params = query_params.copy()
+                        test_params[param] = [payload]
+                        test_url += '?' + '&'.join([f"{k}={quote(str(v[0]))}" for k, v in test_params.items()])
+                    else:
+                        # Add new parameter
+                        test_url += f"?{param}={quote(payload)}"
                     
-                    for payload in test_payloads:
-                        # Build test URL
-                        test_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
-                        if query_params:
-                            # Replace parameter value
-                            test_params = query_params.copy()
-                            test_params[param] = [payload]
-                            test_url += '?' + '&'.join([f"{k}={v[0]}" for k, v in test_params.items()])
-                        else:
-                            test_url += f"?{param}={quote(payload)}"
+                    try:
+                        response = requests.get(
+                            test_url,
+                            allow_redirects=False,  # Don't follow redirects
+                            timeout=self.timeout,
+                            verify=False,
+                            headers={'User-Agent': 'SENTINEL-Scanner/1.0'}
+                        )
                         
-                        try:
-                            response = requests.get(
-                                test_url,
-                                allow_redirects=False,
-                                timeout=self.timeout,
-                                verify=False
-                            )
+                        # CRITICAL FIX: Check if redirect location ACTUALLY redirects to evil.com
+                        if response.status_code in [301, 302, 303, 307, 308]:
+                            location = response.headers.get('Location', '')
                             
-                            # Check if redirect location contains our payload
-                            if response.status_code in [301, 302, 303, 307, 308]:
-                                location = response.headers.get('Location', '')
-                                if 'evil.com' in location or 'javascript:' in location.lower():
-                                    results['vulnerable'] = True
-                                    results['vulnerable_parameters'].append(param)
-                                    results['details'].append({
-                                        'parameter': param,
-                                        'payload': payload,
-                                        'redirect_to': location
-                                    })
-                                    break
-                                    
-                        except Exception:
-                            continue
+                            # Parse the redirect location
+                            redirect_parsed = urlparse(location)
                             
+                            # ONLY flag as vulnerable if:
+                            # 1. Redirects to our evil domain (not just accepts parameter)
+                            # 2. The redirect domain is actually 'evil.com' or similar
+                            if redirect_parsed.netloc and 'evil.com' in redirect_parsed.netloc:
+                                results['vulnerable'] = True
+                                results['vulnerable_parameters'].append(param)
+                                results['details'].append({
+                                    'parameter': param,
+                                    'payload': payload,
+                                    'redirect_to': location,
+                                    'redirect_domain': redirect_parsed.netloc
+                                })
+                                print(f"[!] CONFIRMED: Open redirect via {param} to {redirect_parsed.netloc}")
+                                break
+                            elif 'javascript:' in location.lower():
+                                # XSS via redirect
+                                results['vulnerable'] = True
+                                results['vulnerable_parameters'].append(param)
+                                results['details'].append({
+                                    'parameter': param,
+                                    'payload': payload,
+                                    'redirect_to': location,
+                                    'type': 'javascript_injection'
+                                })
+                                print(f"[!] CONFIRMED: JavaScript injection via {param}")
+                                break
+                        
+                        # Also check if response body contains our payload (DOM-based redirect)
+                        elif response.status_code == 200:
+                            if 'evil.com' in response.text and \
+                               any(js_keyword in response.text.lower() for js_keyword in 
+                                   ['window.location', 'document.location', 'location.href']):
+                                results['vulnerable'] = True
+                                results['vulnerable_parameters'].append(param)
+                                results['details'].append({
+                                    'parameter': param,
+                                    'payload': payload,
+                                    'type': 'dom_based_redirect',
+                                    'note': 'Payload appears in response with redirect JavaScript'
+                                })
+                                print(f"[!] CONFIRMED: Potential DOM-based redirect via {param}")
+                                break
+                    
+                    except Exception as e:
+                        # Silent fail for individual tests
+                        continue
+            
         except Exception as e:
             results['error'] = str(e)
         
