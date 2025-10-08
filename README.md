@@ -9,7 +9,7 @@
 
 **A comprehensive, AI-enhanced vulnerability scanner with intelligent analysis and actionable insights**
 
-[Features](#-features) • [Installation](#-installation) • [API Documentation](#-api-documentation) • [Usage](#-usage) • [Modules](#-scanner-modules)
+[Features](#-features) • [Installation](#-installation) • [API Documentation](#-api-documentation) • [Usage](#-usage) • [Modules](#-scanner-modules) • [Quick Start](#-quick-start)
 
 </div>
 
@@ -21,9 +21,11 @@
 - [Features](#-features)
 - [Architecture](#-architecture)
 - [Installation](#-installation)
+- [Quick Start](#-quick-start)
 - [Configuration](#-configuration)
 - [API Documentation](#-api-documentation)
 - [Scanner Modules](#-scanner-modules)
+- [Comprehensive Scanning](#-comprehensive-scanning)
 - [Usage Examples](#-usage-examples)
 - [AI Integration](#-ai-integration)
 - [Security Considerations](#-security-considerations)
@@ -40,7 +42,7 @@ SENTINEL is an advanced, enterprise-grade vulnerability scanner that combines tr
 ### Why SENTINEL?
 
 - **🤖 AI-Powered Intelligence**: Leverages Google's Gemini 2.0 Flash for context-aware vulnerability analysis
-- **🔍 Comprehensive Coverage**: 10+ specialized scanner modules for thorough security assessment
+- **🔍 Comprehensive Coverage**: 11+ specialized scanner modules for thorough security assessment
 - **⚡ High Performance**: Asynchronous scanning with concurrent module execution
 - **📊 Real-time Monitoring**: Live scan progress tracking via API
 - **🎯 Smart Prioritization**: AI-driven risk assessment and vulnerability ranking
@@ -160,7 +162,10 @@ SENTINEL/
    # Security Settings
    ENABLE_INJECTION_TESTING=true
    ALLOW_ACTIVE_SCANNING=true
-   REQUIRE_CONSENT=true
+   REQUIRE_CONSENT=false
+   
+   # External API Keys
+   SHODAN_API_KEY=your_shodan_api_key_here
    
    # Scan Configuration
    MAX_CONCURRENT_SCANS=5
@@ -189,6 +194,68 @@ SENTINEL/
 
 ---
 
+## 🚀 Quick Start
+
+### Interactive Command Line Interface
+
+SENTINEL includes a powerful command-line interface for easy testing:
+
+```bash
+# Run the interactive CLI
+python sentinal.py
+```
+
+**Available Options:**
+- **10. Comprehensive Scan** - Full reconnaissance + vulnerability scanning (all 11 modules)
+- **11. Shodan Search** - Internet reconnaissance via Shodan
+- **12. DNS Inspector** - DNS enumeration and analysis
+- **13. Link Analyzer** - Link and content analysis
+- **14. Browser Checker** - Headless browser analysis
+- **15. Generate Report** - Combined reconnaissance report
+
+### Comprehensive Scan Example
+
+```bash
+# Start comprehensive scan
+python sentinal.py
+# Select option 10
+# Enter target: example.com
+```
+
+**What happens during comprehensive scan:**
+1. **Stage 1**: Reconnaissance (DNS, Shodan, Browser, Link analysis)
+2. **Stage 2**: Active vulnerability scanning (all 11 modules)
+3. **Stage 3**: AI-powered analysis and reporting
+
+### API Quick Start
+
+```bash
+# Create a comprehensive scan via API
+curl -X POST "http://localhost:8000/api/v1/scans" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "https://example.com",
+    "modules": [
+      "http_scanner", "dns_enumeration", "ssl_scanner", 
+      "network_scanner", "content_discovery", "info_disclosure",
+      "sql_injection", "xss_scanner", "command_injection",
+      "cve_mapper", "authenticated_scanner"
+    ],
+    "scan_type": "active"
+  }'
+
+# Check scan status
+curl "http://localhost:8000/api/v1/scans/{scan_id}"
+
+# Get results
+curl "http://localhost:8000/api/v1/scans/{scan_id}/results"
+
+# Get AI analysis
+curl -X POST "http://localhost:8000/api/v1/scans/{scan_id}/analyze"
+```
+
+---
+
 ## ⚙️ Configuration
 
 ### Environment Variables
@@ -199,9 +266,10 @@ SENTINEL/
 | `API_PORT` | API server port | `8000` | No |
 | `DEBUG` | Enable debug mode | `false` | No |
 | `GEMINI_API_KEY` | Gemini AI API key | - | **Yes** |
+| `SHODAN_API_KEY` | Shodan API key for reconnaissance | - | **Yes** |
 | `ENABLE_INJECTION_TESTING` | Allow injection tests | `true` | No |
 | `ALLOW_ACTIVE_SCANNING` | Enable active scanning | `true` | No |
-| `REQUIRE_CONSENT` | Require scan consent | `true` | No |
+| `REQUIRE_CONSENT` | Require scan consent | `false` | No |
 | `MAX_CONCURRENT_SCANS` | Max parallel scans | `5` | No |
 | `SCAN_TIMEOUT_SECONDS` | Scan timeout | `3600` | No |
 | `RATE_LIMIT_REQUESTS_PER_MINUTE` | Rate limit | `60` | No |
@@ -756,7 +824,7 @@ POST /api/v1/vulnerabilities/{vuln_id}/explain
 
 ## 🔍 Scanner Modules
 
-SENTINEL includes 10+ specialized scanner modules:
+SENTINEL includes 11 specialized scanner modules:
 
 ### 1. HTTP Security Scanner
 - **Type**: Passive
@@ -867,6 +935,61 @@ SENTINEL includes 10+ specialized scanner modules:
   - Session management issues
   - Authorization flaws
   - Privilege escalation
+
+### 12. OSINT Footprint Module
+- **Type**: Passive
+- **Module Name**: `osint_footprint`
+- **Description**: Open Source Intelligence gathering
+- **Detects**:
+  - Social media presence
+  - Public information exposure
+  - Technology stack identification
+  - Employee information
+
+---
+
+## 🎯 Comprehensive Scanning
+
+### All 11 Modules Enabled by Default
+
+SENTINEL now includes **comprehensive scanning capabilities** with all scanner modules enabled by default:
+
+#### **Core Security Modules**
+- **HTTP Security Scanner** - Headers, cookies, server analysis
+- **DNS Enumeration** - Subdomain discovery, DNS records
+- **SSL/TLS Scanner** - Certificate analysis, cipher suites
+- **Network Scanner** - Port scanning, service detection
+
+#### **Vulnerability Testing Modules**
+- **SQL Injection Scanner** - Database injection testing
+- **XSS Scanner** - Cross-site scripting detection
+- **Command Injection Scanner** - OS command injection testing
+- **Content Discovery** - Hidden files and directories
+- **Information Disclosure** - Sensitive data exposure
+
+#### **Advanced Analysis Modules**
+- **CVE Mapper** - Known vulnerability mapping
+- **Authenticated Scanner** - Authenticated functionality testing
+- **OSINT Footprint** - Public intelligence gathering
+
+### Scan Types Available
+
+- **PASSIVE**: Safe reconnaissance (DNS, headers, SSL analysis)
+- **ACTIVE**: Comprehensive vulnerability testing (all modules)
+- **AGGRESSIVE**: Intensive testing with exploitation attempts
+
+### Configuration for Comprehensive Scans
+
+```env
+# Enable all scanning capabilities
+ENABLE_INJECTION_TESTING=true
+ALLOW_ACTIVE_SCANNING=true
+REQUIRE_CONSENT=false
+
+# Required API keys
+SHODAN_API_KEY=your_shodan_api_key_here
+GEMINI_API_KEY=your_gemini_api_key_here
+```
 
 ---
 

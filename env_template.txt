@@ -1,0 +1,118 @@
+# SENTINEL Configuration Template
+# Copy this file to .env and update the values as needed
+
+# Application Settings
+APP_NAME=SENTINEL
+APP_VERSION=1.0.0
+DEBUG=true
+SECRET_KEY=change-me-in-production
+
+# API Configuration
+API_HOST=0.0.0.0
+API_PORT=8000
+API_PREFIX=/api/v1
+
+# Database Configuration
+DATABASE_URL=sqlite:///./sentinel.db
+DATABASE_POOL_SIZE=20
+DATABASE_MAX_OVERFLOW=40
+
+# Redis/Celery Configuration
+REDIS_URL=redis://localhost:6379/0
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+
+# Scanning Configuration
+MAX_CONCURRENT_SCANS=5
+SCAN_TIMEOUT_SECONDS=3600
+RATE_LIMIT_REQUESTS_PER_MINUTE=60
+MAX_SCAN_DEPTH=3
+
+# Link Analyzer Configuration
+# Timeout for reputation API calls and vulnerability probes
+LINK_ANALYZER_TIMEOUT=10
+# Maximum crawling depth for web crawler
+LINK_ANALYZER_MAX_DEPTH=3
+# Maximum number of URLs to discover during crawling
+LINK_ANALYZER_MAX_URLS=50
+# Whether to respect robots.txt during crawling
+LINK_ANALYZER_RESPECT_ROBOTS=false
+# Enable JavaScript rendering for dynamic content (requires Pyppeteer)
+LINK_ANALYZER_USE_JS_RENDERING=false
+# Integrate discovered URLs with other scanner modules
+LINK_ANALYZER_INTEGRATE_WITH_SCANNERS=false
+
+# Crawler Configuration
+# User agent string for web crawler
+CRAWLER_USER_AGENT=SENTINEL-Crawler/1.0
+# Delay between requests to be respectful to target servers
+CRAWLER_DELAY_SECONDS=0.5
+# Maximum number of redirects to follow
+CRAWLER_MAX_REDIRECTS=10
+# Whether to verify SSL certificates during crawling
+CRAWLER_VERIFY_SSL=false
+
+# Browser Automation (for JS rendering)
+# Run browser in headless mode
+BROWSER_HEADLESS=true
+# Browser navigation timeout in milliseconds
+BROWSER_TIMEOUT=30000
+# Wait for network to be idle before capturing content
+BROWSER_WAIT_FOR_NETWORK_IDLE=true
+
+# Vulnerability Testing Configuration
+# Timeout for vulnerability probe tests
+VULNERABILITY_TEST_TIMEOUT=10
+# Enable open redirect vulnerability testing
+OPEN_REDIRECT_TEST_ENABLED=true
+# Enable HTTP header injection testing
+HEADER_INJECTION_TEST_ENABLED=true
+# Enable CRLF injection testing
+CRLF_INJECTION_TEST_ENABLED=true
+
+# SSL/Certificate Validation Configuration
+# Timeout for SSL certificate validation
+SSL_VALIDATION_TIMEOUT=10
+# Days before certificate expiry to show warning
+SSL_CERT_EXPIRY_WARNING_DAYS=30
+# Risk score penalty for weak cipher suites
+SSL_WEAK_CIPHER_PENALTY=10
+
+# Security Settings - IMPORTANT: Set to false for testing only!
+REQUIRE_CONSENT=false
+ALLOW_ACTIVE_SCANNING=true
+JWT_SECRET_KEY=your-jwt-secret-key
+JWT_ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+
+# External API Keys - UPDATE THESE WITH YOUR ACTUAL KEYS
+# Get free Shodan API key at: https://account.shodan.io/
+SHODAN_API_KEY=your_shodan_api_key_here
+
+# VirusTotal API - Get free at: https://www.virustotal.com/gui/my-apikey
+VIRUSTOTAL_API_KEY=your_virustotal_api_key_here
+
+# Google Safe Browsing API - Get free at: https://console.developers.google.com/
+GOOGLE_SAFE_BROWSING_API_KEY=your_google_safe_browsing_api_key_here
+
+# URLScan.io API - Get free at: https://urlscan.io/user/signup/
+URLSCAN_API_KEY=your_urlscan_api_key_here
+
+# AlienVault OTX API - Get free at: https://otx.alienvault.com/
+ALIENVAULT_OTX_API_KEY=your_alienvault_otx_api_key_here
+
+# Other APIs
+VULNERS_API_KEY=your_vulners_api_key_here
+NVD_API_KEY=your_nvd_api_key_here
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# Storage Directories
+REPORTS_DIR=./reports
+SCAN_RESULTS_DIR=./scan_results
+LOG_DIR=./logs
+
+# Feature Flags - Enable comprehensive scanning
+ENABLE_AUTHENTICATED_SCANNING=true
+ENABLE_INJECTION_TESTING=true
+ENABLE_OSINT_MODULES=true
+ENABLE_CVE_MAPPING=true

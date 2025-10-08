@@ -296,8 +296,9 @@ class SSLScanner(BaseScannerModule):
     
     def _perform_sslyze_scan(self, scanner: Scanner, scan_requests: list) -> list:
         """Perform the actual SSLyze scan."""
+        scanner.queue_scans(scan_requests)
         results = []
-        for server_scan_result in scanner.get_results(scan_requests):
+        for server_scan_result in scanner.get_results():
             results.append(server_scan_result)
         return results
     
@@ -430,30 +431,24 @@ class SSLScanner(BaseScannerModule):
         protocol_info = {}
         
         protocol_scans = {
-            'SSLv2': scan_result.ssl_2_0_cipher_suites,
-            'SSLv3': scan_result.ssl_3_0_cipher_suites,
-            'TLSv1.0': scan_result.tls_1_0_cipher_suites,
-            'TLSv1.1': scan_result.tls_1_1_cipher_suites,
-            'TLSv1.2': scan_result.tls_1_2_cipher_suites,
-            'TLSv1.3': scan_result.tls_1_3_cipher_suites,
+            'SSLv2': getattr(scan_result, 'ssl_2_0_cipher_suites', None),
+            'SSLv3': getattr(scan_result, 'ssl_3_0_cipher_suites', None),
+            'TLSv1.0': getattr(scan_result, 'tls_1_0_cipher_suites', None),
+            'TLSv1.1': getattr(scan_result, 'tls_1_1_cipher_suites', None),
+            'TLSv1.2': getattr(scan_result, 'tls_1_2_cipher_suites', None),
+            'TLSv1.3': getattr(scan_result, 'tls_1_3_cipher_suites', None),
         }
         
         for protocol_name, protocol_result in protocol_scans.items():
             if protocol_result and hasattr(protocol_result, 'result') and protocol_result.result:
                 result = protocol_result.result
-                
-                # Check if protocol is supported
                 is_supported = len(result.accepted_cipher_suites) > 0 if hasattr(result, 'accepted_cipher_suites') else False
-                
                 protocol_info[protocol_name] = {
                     'supported': is_supported,
                     'cipher_count': len(result.accepted_cipher_suites) if hasattr(result, 'accepted_cipher_suites') else 0
                 }
-                
-                # Check for insecure protocols
                 if is_supported and protocol_name in self.insecure_protocols:
                     severity = SeverityLevel.CRITICAL if protocol_name in ['SSLv2', 'SSLv3'] else SeverityLevel.HIGH
-                    
                     vulnerabilities.append(
                         Vulnerability(
                             module=self.name,
@@ -467,12 +462,11 @@ class SSLScanner(BaseScannerModule):
                             cve_ids=['CVE-2014-3566'] if protocol_name == 'SSLv3' else [],
                         )
                     )
-        
-        # Check if only old protocols are supported
+
         modern_protocols = ['TLSv1.2', 'TLSv1.3']
-        has_modern = any(protocol_info.get(p, {}).get('supported', False) for p in modern_protocols)
-        
-        if not has_modern:
+        has_modern = any(protocol_info.get(p, {}).get('supported') for p in modern_protocols)
+
+        if not has_modern and any(p.get('supported') for p in protocol_info.values()):
             vulnerabilities.append(
                 Vulnerability(
                     module=self.name,
@@ -485,7 +479,7 @@ class SSLScanner(BaseScannerModule):
                     remediation="Enable TLS 1.2 and TLS 1.3 support.",
                 )
             )
-        
+            
         return vulnerabilities, protocol_info
     
     def _analyze_cipher_suites(self, scan_result) -> tuple:
@@ -494,12 +488,12 @@ class SSLScanner(BaseScannerModule):
         cipher_info = {}
         
         protocol_scans = {
-            'SSLv2': scan_result.ssl_2_0_cipher_suites,
-            'SSLv3': scan_result.ssl_3_0_cipher_suites,
-            'TLSv1.0': scan_result.tls_1_0_cipher_suites,
-            'TLSv1.1': scan_result.tls_1_1_cipher_suites,
-            'TLSv1.2': scan_result.tls_1_2_cipher_suites,
-            'TLSv1.3': scan_result.tls_1_3_cipher_suites,
+            'SSLv2': getattr(scan_result, 'ssl_2_0_cipher_suites', None),
+            'SSLv3': getattr(scan_result, 'ssl_3_0_cipher_suites', None),
+            'TLSv1.0': getattr(scan_result, 'tls_1_0_cipher_suites', None),
+            'TLSv1.1': getattr(scan_result, 'tls_1_1_cipher_suites', None),
+            'TLSv1.2': getattr(scan_result, 'tls_1_2_cipher_suites', None),
+            'TLSv1.3': getattr(scan_result, 'tls_1_3_cipher_suites', None),
         }
         
         weak_ciphers_found = []
@@ -507,15 +501,11 @@ class SSLScanner(BaseScannerModule):
         for protocol_name, protocol_result in protocol_scans.items():
             if protocol_result and hasattr(protocol_result, 'result') and protocol_result.result:
                 result = protocol_result.result
-                
                 if hasattr(result, 'accepted_cipher_suites'):
-                    cipher_info[protocol_name] = []
-                    
-                    for cipher_suite in result.accepted_cipher_suites:
-                        cipher_name = cipher_suite.cipher_suite.name if hasattr(cipher_suite, 'cipher_suite') else str(cipher_suite)
-                        cipher_info[protocol_name].append(cipher_name)
-                        
-                        # Check for weak ciphers
+                    cipher_info[protocol_name] = [
+                        cipher.cipher_suite.name for cipher in result.accepted_cipher_suites
+                    ]
+                    for cipher_name in cipher_info[protocol_name]:
                         for weak_cipher in self.weak_ciphers:
                             if weak_cipher in cipher_name.upper():
                                 weak_ciphers_found.append({
@@ -523,8 +513,7 @@ class SSLScanner(BaseScannerModule):
                                     'cipher': cipher_name,
                                     'weakness': weak_cipher
                                 })
-        
-        # Report weak ciphers
+
         if weak_ciphers_found:
             for weak_cipher in weak_ciphers_found:
                 vulnerabilities.append(
@@ -539,10 +528,7 @@ class SSLScanner(BaseScannerModule):
                         remediation="Disable weak cipher suites and use only strong, modern ciphers.",
                     )
                 )
-        
-        # Check for cipher suite order (server preference)
-        # This would require additional analysis of cipher suite preferences
-        
+            
         return vulnerabilities, cipher_info
     
     def _check_known_vulnerabilities(self, scan_result) -> Dict[str, bool]:
@@ -584,45 +570,56 @@ class SSLScanner(BaseScannerModule):
             import httpx
             
             url = f"https://{hostname}:{port}"
-            async with httpx.AsyncClient(verify=False) as client:
-                response = await client.get(url, follow_redirects=False)
+            # Use a client that follows redirects by default
+            async with httpx.AsyncClient(verify=False, follow_redirects=True) as client:
+                response = await client.get(url)
+                
+                # After redirects, the final URL might be different
+                final_url = str(response.url)
                 headers = response.headers
                 
-                # Check for HSTS
+                # Check for HSTS on the final response
                 if 'strict-transport-security' not in headers:
                     vulnerabilities.append(
                         Vulnerability(
                             module=self.name,
                             name="Missing HSTS Header",
-                            description="HTTP Strict Transport Security (HSTS) header is not set",
+                            description="HTTP Strict Transport Security (HSTS) header is not set on the final response.",
                             severity=SeverityLevel.MEDIUM,
                             confidence=0.9,
-                            affected_urls=[url],
-                            remediation="Add Strict-Transport-Security header with appropriate max-age directive.",
+                            affected_urls=[final_url],
+                            remediation="Add a Strict-Transport-Security header with an appropriate max-age directive.",
                             references=["https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security"]
                         )
                     )
                 else:
                     # Check HSTS configuration
                     hsts = headers['strict-transport-security']
-                    if 'max-age=0' in hsts or 'max-age=1' in hsts:
+                    max_age_value = 0
+                    if 'max-age' in hsts:
+                        try:
+                            max_age_value = int(hsts.split('max-age=')[1].split(';')[0].strip())
+                        except (ValueError, IndexError):
+                            pass
+
+                    if max_age_value < 15552000: # At least 6 months
                         vulnerabilities.append(
                             Vulnerability(
                                 module=self.name,
                                 name="Weak HSTS Configuration",
-                                description="HSTS max-age is too short",
+                                description=f"HSTS max-age is set to {max_age_value}, which is less than the recommended minimum.",
                                 severity=SeverityLevel.LOW,
                                 confidence=0.9,
-                                affected_urls=[url],
+                                affected_urls=[final_url],
                                 evidence={'hsts_header': hsts},
                                 remediation="Set HSTS max-age to at least 31536000 (1 year).",
                             )
                         )
-                
+                    
         except Exception:
-            # If we can't check headers, it's not critical for SSL scan
+            # If headers can't be checked, we'll pass for now.
             pass
-        
+            
         return vulnerabilities
     
     def _check_configuration_issues(self, scan_result) -> List[Vulnerability]:
