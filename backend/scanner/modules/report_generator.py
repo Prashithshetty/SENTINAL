@@ -70,15 +70,32 @@ class ReportGenerator:
         except:
             return False
 
+    def _safe_get_score(self, analysis_dict, score_key, default=0):
+        """Safely extract a score from analysis dict, handling None values"""
+        if analysis_dict is None:
+            return default
+        
+        score = analysis_dict.get(score_key, default)
+        
+        # Handle None, ensure we return a numeric value
+        if score is None:
+            return default
+        
+        # Ensure the score is numeric
+        try:
+            return float(score)
+        except (TypeError, ValueError):
+            return default
+
     def generate(self, url, link_analysis, dns_analysis, browser_analysis, shodan_analysis):
         """Generate a comprehensive security report"""
         is_trusted = self._is_trusted_domain(url)
         
-        # Calculate weighted component scores
-        browser_score = browser_analysis.get('risk_score', 0)
-        dns_score = dns_analysis.get('risk_score', 0)
-        link_score = link_analysis.get('risk_score', 0)
-        server_score = shodan_analysis.get('exposure_score', 0)
+        # Calculate weighted component scores with proper None handling
+        browser_score = self._safe_get_score(browser_analysis, 'risk_score', 0)
+        dns_score = self._safe_get_score(dns_analysis, 'risk_score', 0)
+        link_score = self._safe_get_score(link_analysis, 'risk_score', 0)
+        server_score = self._safe_get_score(shodan_analysis, 'exposure_score', 0)
 
         # For trusted domains with suspicious URLs, increase the scores
         if not is_trusted and any(domain in urlparse(url).netloc for domain in self.trusted_domains):
@@ -122,7 +139,8 @@ class ReportGenerator:
         }
 
         # Add browser security issues
-        for warning in browser_analysis.get('warnings', []):
+        browser_warnings = browser_analysis.get('warnings', []) if browser_analysis else []
+        for warning in browser_warnings:
             if any(critical in warning.lower() for critical in ['critical', 'severe', 'high']):
                 security_issues['critical'].append({
                     'category': 'Browser',
@@ -135,7 +153,8 @@ class ReportGenerator:
                 })
 
         # Add DNS security issues (with reduced severity for trusted domains)
-        for warning in dns_analysis.get('warnings', []):
+        dns_warnings = dns_analysis.get('warnings', []) if dns_analysis else []
+        for warning in dns_warnings:
             if is_trusted:
                 security_issues['low'].append({
                     'category': 'DNS',
@@ -154,7 +173,8 @@ class ReportGenerator:
                     })
 
         # Add link analysis issues
-        for warning in link_analysis.get('warnings', []):
+        link_warnings = link_analysis.get('warnings', []) if link_analysis else []
+        for warning in link_warnings:
             if any(critical in warning.lower() for critical in ['ssl', 'https', 'certificate']):
                 security_issues['high'].append({
                     'category': 'URL/SSL',
@@ -171,7 +191,8 @@ class ReportGenerator:
         
         # Add critical recommendations first
         if not is_trusted:
-            if dns_analysis.get('dnssec', {}).get('enabled') is False:
+            dnssec_info = dns_analysis.get('dnssec', {}) if dns_analysis else {}
+            if dnssec_info.get('enabled') is False:
                 recommendations.append({
                     'category': 'DNS',
                     'priority': 'High',
@@ -179,8 +200,9 @@ class ReportGenerator:
                 })
 
         # Add security header recommendations
+        security_headers = browser_analysis.get('security_headers', {}) if browser_analysis else {}
         missing_headers = [
-            header for header, config in browser_analysis.get('security_headers', {}).items()
+            header for header, config in security_headers.items()
             if not config.get('present')
         ]
         
@@ -194,7 +216,8 @@ class ReportGenerator:
 
         # Generate key findings
         key_findings = []
-        if link_analysis.get('ssl_info', {}).get('valid'):
+        ssl_info = link_analysis.get('ssl_info', {}) if link_analysis else {}
+        if ssl_info.get('valid'):
             key_findings.append('Valid SSL certificate')
         else:
             key_findings.append('Invalid SSL certificate')
@@ -224,8 +247,8 @@ class ReportGenerator:
         return {
             'metadata': {
                 'url': url,
-                'timestamp': browser_analysis.get('timestamp'),
-                'scan_duration': browser_analysis.get('scan_duration')
+                'timestamp': browser_analysis.get('timestamp') if browser_analysis else None,
+                'scan_duration': browser_analysis.get('scan_duration') if browser_analysis else None
             },
             'detailed_analysis': {
                 'browser_analysis': browser_analysis,
