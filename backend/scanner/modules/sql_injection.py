@@ -1600,8 +1600,7 @@ class SQLInjectionScanner(BaseScannerModule):
                         if vuln.confidence > existing.confidence:
                             unique_vulns[i] = vuln
                         break
-        
-        
+      
         return unique_vulns
     
     async def _rate_limited_request(self, client: httpx.AsyncClient, url: str, 
