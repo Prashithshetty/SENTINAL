@@ -1,0 +1,214 @@
+# SSL Scanner Configuration File
+# This file allows you to customize the scanner behavior without modifying code
+
+# Weak cipher patterns to detect
+weak_ciphers:
+  - RC4
+  - DES
+  - 3DES
+  - MD5
+  - NULL
+  - EXPORT
+  - anon
+  - IDEA
+  - SEED
+  - CAMELLIA
+  - ARIA
+
+# Protocols considered insecure
+insecure_protocols:
+  - SSLv2
+  - SSLv3
+  - TLSv1.0
+  - TLSv1.1
+
+# Recommended modern protocols
+recommended_protocols:
+  - TLSv1.2
+  - TLSv1.3
+
+# Minimum acceptable RSA key size in bits
+minimum_key_size: 2048
+
+# Minimum HSTS max-age in seconds (31536000 = 1 year)
+minimum_hsts_max_age: 31536000
+
+# Enable Certificate Transparency checking
+certificate_transparency_enabled: true
+
+# Enable OCSP revocation checking
+ocsp_check_enabled: true
+
+# Enable NVD vulnerability database integration
+nvd_api_enabled: true
+
+# NVD API endpoint
+nvd_api_url: "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+# Certificate Transparency log list URL
+ct_log_list_url: "https://www.gstatic.com/ct/log_list/v3/log_list.json"
+
+# Known SSL/TLS vulnerabilities with scoring impact
+known_vulnerabilities:
+  heartbleed:
+    name: "Heartbleed (CVE-2014-0160)"
+    severity: "CRITICAL"
+    cve: "CVE-2014-0160"
+    description: "Server is vulnerable to Heartbleed attack allowing memory disclosure"
+    score_impact: 40
+  
+  ccs_injection:
+    name: "CCS Injection (CVE-2014-0224)"
+    severity: "HIGH"
+    cve: "CVE-2014-0224"
+    description: "Server is vulnerable to CCS injection allowing MITM attacks"
+    score_impact: 30
+  
+  robot:
+    name: "ROBOT Attack"
+    severity: "HIGH"
+    description: "Server is vulnerable to ROBOT (Return Of Bleichenbacher's Oracle Threat)"
+    score_impact: 25
+  
+  crime:
+    name: "CRIME Attack"
+    severity: "MEDIUM"
+    cve: "CVE-2012-4929"
+    description: "Server is vulnerable to CRIME compression attack"
+    score_impact: 15
+  
+  breach:
+    name: "BREACH Attack"
+    severity: "MEDIUM"
+    cve: "CVE-2013-3587"
+    description: "Server may be vulnerable to BREACH compression attack"
+    score_impact: 10
+  
+  poodle:
+    name: "POODLE (CVE-2014-3566)"
+    severity: "HIGH"
+    cve: "CVE-2014-3566"
+    description: "Server is vulnerable to POODLE attack on SSLv3"
+    score_impact: 30
+  
+  sweet32:
+    name: "Sweet32 (CVE-2016-2183)"
+    severity: "MEDIUM"
+    cve: "CVE-2016-2183"
+    description: "Server uses 64-bit block ciphers vulnerable to Sweet32 attack"
+    score_impact: 15
+  
+  drown:
+    name: "DROWN (CVE-2016-0800)"
+    severity: "HIGH"
+    cve: "CVE-2016-0800"
+    description: "Server is vulnerable to DROWN attack"
+    score_impact: 30
+  
+  logjam:
+    name: "Logjam (CVE-2015-4000)"
+    severity: "HIGH"
+    cve: "CVE-2015-4000"
+    description: "Server is vulnerable to Logjam attack on weak DH parameters"
+    score_impact: 25
+  
+  freak:
+    name: "FREAK (CVE-2015-0204)"
+    severity: "HIGH"
+    cve: "CVE-2015-0204"
+    description: "Server is vulnerable to FREAK attack allowing downgrade to export ciphers"
+    score_impact: 30
+  
+  alpaca:
+    name: "ALPACA (CVE-2021-3618)"
+    severity: "MEDIUM"
+    cve: "CVE-2021-3618"
+    description: "Application Layer Protocol Confusion Attack"
+    score_impact: 15
+  
+  raccoon:
+    name: "Raccoon Attack (CVE-2020-1968)"
+    severity: "LOW"
+    cve: "CVE-2020-1968"
+    description: "Timing attack on DH key exchange"
+    score_impact: 5
+
+# Grading thresholds (0-100 scale)
+grading:
+  a_plus: 95
+  a: 90
+  a_minus: 85
+  b: 80
+  c: 70
+  d: 60
+  e: 50
+  f: 0
+
+# Timeout settings (in seconds)
+timeouts:
+  connection: 10
+  scan: 300
+  api_request: 15
+
+# Logging configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+# Rate limiting for external API calls
+rate_limiting:
+  nvd_requests_per_minute: 5
+  ct_log_requests_per_minute: 10
+  
+# Recommended cipher suites (for documentation purposes)
+recommended_ciphers:
+  tls13:
+    - "TLS_AES_128_GCM_SHA256"
+    - "TLS_AES_256_GCM_SHA384"
+    - "TLS_CHACHA20_POLY1305_SHA256"
+  
+  tls12:
+    - "ECDHE-ECDSA-AES128-GCM-SHA256"
+    - "ECDHE-RSA-AES128-GCM-SHA256"
+    - "ECDHE-ECDSA-AES256-GCM-SHA384"
+    - "ECDHE-RSA-AES256-GCM-SHA384"
+    - "ECDHE-ECDSA-CHACHA20-POLY1305"
+    - "ECDHE-RSA-CHACHA20-POLY1305"
+
+# Security headers to check
+security_headers:
+  - name: "Strict-Transport-Security"
+    required: true
+    severity: "MEDIUM"
+    
+  - name: "Content-Security-Policy"
+    required: false
+    severity: "LOW"
+    
+  - name: "X-Content-Type-Options"
+    required: false
+    severity: "LOW"
+    
+  - name: "X-Frame-Options"
+    required: false
+    severity: "LOW"
+    
+  - name: "X-XSS-Protection"
+    required: false
+    severity: "INFO"
+
+# Server configuration examples for remediation
+server_configs:
+  apache:
+    modern_config: |
+      SSLProtocol -all +TLSv1.2 +TLSv1.3
+      SSLCipherSuite ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
+      SSLHonorCipherOrder on
+      Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+      
+  nginx:
+    modern_config: |
+      ssl_protocols TLSv1.2 TLSv1.3;
+      ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384';
+      ssl_prefer_server_ciphers on;
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;

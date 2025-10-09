@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     rate_limit_requests_per_minute: int = Field(default=60, env="RATE_LIMIT_REQUESTS_PER_MINUTE")
     max_scan_depth: int = Field(default=3, env="MAX_SCAN_DEPTH")
     
+    # XSS Scanner Configuration - NEW
+    xss_passive_payload_limit: int = Field(default=5, env="XSS_PASSIVE_PAYLOAD_LIMIT")
+    xss_active_payload_limit: int = Field(default=20, env="XSS_ACTIVE_PAYLOAD_LIMIT")
+    xss_aggressive_payload_limit: int = Field(default=50, env="XSS_AGGRESSIVE_PAYLOAD_LIMIT")
+    xss_enable_browser_testing: bool = Field(default=True, env="XSS_ENABLE_BROWSER_TESTING")
+    
     # Link Analyzer Configuration
     link_analyzer_timeout: int = Field(default=10, env="LINK_ANALYZER_TIMEOUT")
     link_analyzer_max_depth: int = Field(default=3, env="LINK_ANALYZER_MAX_DEPTH")
@@ -124,6 +130,8 @@ class Settings(BaseSettings):
             "sql_injection",
             "xss_scanner",
             "command_injection",
+            "ssrf_scanner",
+            "rce_scanner",
         ])
         
         if self.enable_osint_modules:
