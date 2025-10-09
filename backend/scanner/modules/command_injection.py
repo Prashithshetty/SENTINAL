@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 import base64
 import json
 from contextlib import asynccontextmanager
-from enum import Enum
 
 # Install required packages:
 # pip install httpx tenacity
@@ -34,61 +33,14 @@ from tenacity import (
     retry_if_exception_type
 )
 
-# ============================================================================
-# ENUMS AND DATA CLASSES
-# ============================================================================
-
-class ScanType(Enum):
-    """Scan intensity levels"""
-    PASSIVE = "passive"      # No active testing
-    ACTIVE = "active"        # Standard testing
-    AGGRESSIVE = "aggressive" # Full testing with OOB
-
-class SeverityLevel(Enum):
-    """Vulnerability severity classification"""
-    INFO = "info"
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-@dataclass
-class ScanConfig:
-    """Scanner configuration"""
-    target: str
-    scan_type: ScanType = ScanType.ACTIVE
-    timeout: int = 30
-    headers: Optional[Dict[str, str]] = None
-    max_retries: int = 3
-    connection_pool_size: int = 10
-    rate_limit_delay: float = 0.1
-
-@dataclass
-class Vulnerability:
-    """Vulnerability details"""
-    module: str
-    name: str
-    description: str
-    severity: SeverityLevel
-    confidence: float
-    affected_urls: List[str]
-    evidence: Dict[str, Any]
-    remediation: str
-    references: Optional[List[str]] = None
-    cwe_ids: Optional[List[str]] = None
-
-@dataclass
-class ScanResult:
-    """Scan results container"""
-    module_name: str
-    success: bool
-    started_at: datetime
-    completed_at: datetime
-    vulnerabilities: List[Vulnerability]
-    errors: List[str]
-    warnings: List[str]
-    info: Dict[str, Any]
-    statistics: Dict[str, Any]
+from ..base_module import (
+    BaseScannerModule,
+    ScanConfig,
+    ScanResult,
+    Vulnerability,
+    SeverityLevel,
+    ScanType
+)
 
 @dataclass
 class InjectionContext:
@@ -543,12 +495,14 @@ class InteractshOOBManager:
 # COMMAND INJECTION SCANNER
 # ============================================================================
 
-class CommandInjectionScanner:
+class CommandInjectionScanner(BaseScannerModule):
     """Enhanced Command Injection vulnerability scanner."""
     
     def __init__(self):
+        super().__init__()
         self.name = "CommandInjectionScanner"
         self.description = "Command injection vulnerability scanner with OOB detection"
+        self.scan_type = ScanType.ACTIVE
         self.payload_generator = PayloadGenerator()
         self.response_analyzer = ResponseAnalyzer()
         self.oob_manager = InteractshOOBManager()

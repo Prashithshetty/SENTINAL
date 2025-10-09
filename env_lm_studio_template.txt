@@ -1,0 +1,112 @@
+# POC Scanner Environment Variables Template - LM Studio Support
+# Copy this file to .env and configure your settings
+
+# ==============================================================================
+# LM STUDIO CONFIGURATION (PRIMARY - for local model execution)
+# ==============================================================================
+
+# Enable LM Studio as the primary backend (set to 'true' to use LM Studio)
+USE_LM_STUDIO=true
+
+# LM Studio API URL (default is standard LM Studio local server)
+# Make sure LM Studio is running with the server started
+LM_STUDIO_API_URL=http://localhost:1234/v1
+
+# Custom model name to use (this should match the model loaded in LM Studio)
+# Examples for uncensored models you can download in LM Studio:
+# - DeepSeek-R1-Distill-Qwen-7B-Uncensored (recommended)
+# - dolphin-2.2.1-mistral-7b
+# - WizardLM-7B-Uncensored
+# - openhermes-2.5-mistral-7b
+CUSTOM_MODEL_NAME=DeepSeek-R1-Distill-Qwen-7B-Uncensored
+
+# ==============================================================================
+# HUGGING FACE CONFIGURATION (FALLBACK - if LM Studio is not available)
+# ==============================================================================
+
+# Hugging Face API Key (optional, used as fallback if LM Studio is not available)
+# Get your API key from: https://huggingface.co/settings/tokens
+HUGGINGFACE_API_KEY=your_huggingface_api_key_here
+
+# ==============================================================================
+# SCANNER CONFIGURATION
+# ==============================================================================
+
+MAX_CONCURRENT_SCANS=5
+SCAN_TIMEOUT_SECONDS=300
+RATE_LIMIT_REQUESTS_PER_MINUTE=60
+MAX_SCAN_DEPTH=5
+REQUIRE_CONSENT=false
+
+# ==============================================================================
+# POC GENERATION SETTINGS
+# ==============================================================================
+
+# Default generation parameters
+POC_MAX_TOKENS=1500
+POC_TEMPERATURE=0.3
+POC_TOP_P=0.95
+
+# ==============================================================================
+# DATABASE CONFIGURATION (optional)
+# ==============================================================================
+
+DATABASE_URL=sqlite:///./sentinal.db
+
+# ==============================================================================
+# API CONFIGURATION
+# ==============================================================================
+
+API_HOST=0.0.0.0
+API_PORT=8000
+API_RELOAD=true
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+
+LOG_LEVEL=INFO
+LOG_FILE=sentinal.log
+
+# ==============================================================================
+# OPTIONAL: Other API Keys
+# ==============================================================================
+
+# Gemini API Key (for original AI analyzer)
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# Shodan API Key (for network scanning)
+SHODAN_API_KEY=your_shodan_api_key_here
+
+# ==============================================================================
+# LM STUDIO SETUP INSTRUCTIONS
+# ==============================================================================
+# 
+# 1. Download and install LM Studio from: https://lmstudio.ai/
+# 
+# 2. Download an uncensored model in LM Studio:
+#    - Open LM Studio
+#    - Go to the "Discover" tab
+#    - Search for one of these models:
+#      * DeepSeek-R1-Distill-Qwen-7B-Uncensored (recommended)
+#      * TheBloke/dolphin-2.2.1-mistral-7B-GGUF
+#      * TheBloke/WizardLM-7B-Uncensored-GGUF
+#      * teknium/OpenHermes-2.5-Mistral-7B-GGUF
+#    - Download the model (choose Q4_K_M or Q5_K_M quantization for balance)
+# 
+# 3. Load the model:
+#    - Go to the "Chat" tab
+#    - Select your downloaded model from the dropdown
+#    - Wait for it to load
+# 
+# 4. Start the local server:
+#    - Go to the "Local Server" tab
+#    - Click "Start Server"
+#    - Verify it's running on http://localhost:1234
+# 
+# 5. Update CUSTOM_MODEL_NAME above to match your loaded model
+# 
+# 6. Run the POC scanner:
+#    python run_poc_scan.py --target <url> --module xss_scanner
+# 
+# ==============================================================================

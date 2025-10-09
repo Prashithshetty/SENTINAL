@@ -191,6 +191,43 @@ async def run_individual_module(module_name: str):
         
         # Save the result
         save_scan_result(vulnerability_results, f"module_{module_name}", normalized_url)
+        
+        # Generate POC report if vulnerabilities were found (especially for XSS scanner)
+        if vulnerability_results and not vulnerability_results.get("error"):
+            vulnerabilities = vulnerability_results.get("vulnerabilities", [])
+            
+            if vulnerabilities and len(vulnerabilities) > 0:
+                print("\n" + "="*60)
+                print("[*] Vulnerabilities detected! Generating POC report...")
+                print("="*60)
+                
+                try:
+                    # Import POC generator
+                    from backend.scanner.poc_generator import poc_generator
+                    
+                    # Generate POC report
+                    poc_report = await poc_generator.generate_poc_for_module(
+                        target=normalized_url,
+                        module_name=module_name,
+                        scan_result=vulnerability_results,
+                        auto_display=True  # Automatically display the POC
+                    )
+                    
+                    if poc_report.get("generated"):
+                        print("\n[+] POC report generated successfully!")
+                    else:
+                        if poc_report.get("message"):
+                            print(f"\n[!] POC generation: {poc_report['message']}")
+                        elif poc_report.get("error"):
+                            print(f"\n[!] POC generation failed: {poc_report['error']}")
+                            
+                except Exception as poc_error:
+                    print(f"\n[!] Error generating POC report: {poc_error}")
+                    if is_debug_mode:
+                        import traceback
+                        traceback.print_exc()
+            else:
+                print(f"\n[*] No vulnerabilities found. POC generation skipped.")
 
     except Exception as e:
         print(f"Error running '{module_name}' scan: {e}")
