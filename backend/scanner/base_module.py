@@ -35,6 +35,7 @@ class ScanConfig:
     cookies: Optional[Dict[str, str]] = None
     headers: Optional[Dict[str, str]] = None
     auth: Optional[Dict[str, Any]] = None
+    debug: bool = False  # Debug mode for verbose output
     custom_params: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass

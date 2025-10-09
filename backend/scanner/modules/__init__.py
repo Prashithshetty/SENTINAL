@@ -8,6 +8,8 @@ from .info_disclosure import InfoDisclosureScanner
 from .xss_scanner import XSSScanner
 from .command_injection import CommandInjectionScanner
 from .sql_injection import SQLInjectionScanner
+from .ssrf_scanner import SSRFScanner
+from .rce_scanner import RCEScanner
 from .browser_checker import BrowserChecker
 from .dns_inspector import DNSInspector
 from .link_analyzer import LinkAnalyzer
@@ -23,6 +25,8 @@ SCANNER_MODULES = {
     "xss_scanner": XSSScanner,
     "command_injection": CommandInjectionScanner,
     "sql_injection": SQLInjectionScanner,
+    "ssrf_scanner": SSRFScanner,
+    "rce_scanner": RCEScanner,
     "browser_checker": BrowserChecker,
     "dns_inspector": DNSInspector,
     "link_analyzer": LinkAnalyzer,
@@ -72,6 +76,8 @@ __all__ = [
     "XSSScanner",
     "CommandInjectionScanner",
     "SQLInjectionScanner",
+    "SSRFScanner",
+    "RCEScanner",
     "BrowserChecker",
     "DNSInspector",
     "LinkAnalyzer",

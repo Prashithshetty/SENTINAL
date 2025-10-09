@@ -140,15 +140,39 @@ async def run_individual_module(module_name: str):
             print("Error: Invalid URL format.")
             return
 
+        # Ask user for scan type
+        print("\nSelect scan type:")
+        print("1. Passive (Safe, no active probing)")
+        print("2. Active (Standard vulnerability testing)")
+        print("3. Aggressive (Thorough testing with all payloads)")
+        
+        scan_choice = input("Enter choice (1-3, default: 2): ").strip() or "2"
+        
+        scan_type_map = {
+            "1": ScanType.PASSIVE,
+            "2": ScanType.ACTIVE,
+            "3": ScanType.AGGRESSIVE
+        }
+        
+        scan_type = scan_type_map.get(scan_choice, ScanType.ACTIVE)
+        
+        # Prompt for debug mode
+        debug_choice = input("Enable debug mode for verbose output? (y/N): ").strip().lower()
+        is_debug_mode = debug_choice == 'y'
+        
         print(f"\n[+] Starting '{module_name}' scan for: {normalized_url}")
+        print(f"[+] Scan Type: {scan_type.value}")
+        if is_debug_mode:
+            print("[+] Debug Mode: ENABLED")
         print("-" * 40)
 
         config = ScanConfig(
             target=normalized_url,
-            scan_type=ScanType.ACTIVE,  # Run in active mode for thorough testing
+            scan_type=scan_type,  # Use selected scan type
             timeout=3600,
             rate_limit=1,
-            max_depth=3
+            max_depth=3,
+            debug=is_debug_mode  # Pass the user's choice here
         )
         
         scan_job = await scanner_engine.create_scan(
@@ -371,8 +395,14 @@ async def run_comprehensive_scan():
             print("Error: Invalid URL format. Please provide a valid URL or domain.")
             return
 
+        # Prompt for debug mode
+        debug_choice = input("Enable debug mode for verbose output? (y/N): ").strip().lower()
+        is_debug_mode = debug_choice == 'y'
+        
         print(f"\n[+] Starting Comprehensive Scan for: {normalized_url}")
         print(f"[+] Domain: {domain}")
+        if is_debug_mode:
+            print("[+] Debug Mode: ENABLED")
         print("-" * 60)
 
         # --- Stage 1: Web Crawling ---
@@ -472,7 +502,8 @@ async def run_comprehensive_scan():
                         scan_type=ScanType.ACTIVE,
                         timeout=300,  # 5 minutes per URL
                         rate_limit=1,
-                        max_depth=1  # Don't recurse for each URL
+                        max_depth=1,  # Don't recurse for each URL
+                        debug=is_debug_mode  # Pass the debug setting
                     )
                     
                     try:

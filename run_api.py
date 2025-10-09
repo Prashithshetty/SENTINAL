@@ -21,7 +21,7 @@ if __name__ == "__main__":
     print("SENTINEL Vulnerability Scanner API")
     print("=" * 60)
     print("\nStarting API server...")
-    print("API Documentation: http://localhost:8000/docs")
+    print("API Documentation: http://localhost:8001/docs")
     print("Test Interface: Open frontend/test.html in your browser")
     print("\nPress Ctrl+C to stop the server")
     print("=" * 60)
@@ -30,7 +30,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=False,
         log_level="info"
     )
