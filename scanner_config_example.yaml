@@ -1,0 +1,32 @@
+# Example configuration for Dynamic SQL Scanner
+# Save this as 'scanner_config.yaml' or use in your Python scripts
+
+# Target configuration
+target:
+  url: "https://juice-shop.herokuapp.com"  # Or your local instance
+  scan_type: "ACTIVE"  # PASSIVE, ACTIVE, or AGGRESSIVE
+  
+# Scanner settings
+scanner:
+  timeout: 60  # Seconds
+  rate_limit: 5  # Requests per second
+  max_depth: 3  # Crawling depth
+  
+# Browser settings
+browser:
+  headless: true  # Run in headless mode
+  viewport:
+    width: 1920
+    height: 1080
+  
+# Payload settings
+payloads:
+  max_per_param: 10  # Maximum payloads to test per parameter
+  include_time_based: true  # Include time-based payloads
+  include_boolean: true  # Include boolean-based payloads
+  
+# Output settings
+output:
+  verbose: true  # Detailed output
+  save_report: true  # Save HTML report
+  report_path: "./reports/sql_injection_report.html"

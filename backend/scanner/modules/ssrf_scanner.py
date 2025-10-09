@@ -11,6 +11,21 @@ from typing import Dict, List, Any, Optional, Set, Tuple
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode, quote, urljoin, urlunparse
 from bs4 import BeautifulSoup
+import random
+import string
+
+# Import browser automation - try playwright first, then pyppeteer
+PYPPETEER_AVAILABLE = False
+try:
+    from playwright.async_api import async_playwright
+    PYPPETEER_AVAILABLE = True
+except ImportError:
+    try:
+        from pyppeteer import launch
+        PYPPETEER_AVAILABLE = True
+    except ImportError:
+        pass
+
 from ..base_module import (
     BaseScannerModule,
     ScanConfig,
@@ -26,8 +41,12 @@ class SSRFScanner(BaseScannerModule):
     def __init__(self):
         super().__init__()
         self.name = "SSRFScanner"
-        self.description = "Detects Server-Side Request Forgery (SSRF) vulnerabilities"
+        self.description = "Detects Server-Side Request Forgery (SSRF) vulnerabilities with intelligent discovery"
         self.scan_type = ScanType.ACTIVE
+        
+        # Store discovered API endpoints from browser
+        self.discovered_endpoints = []
+        self.captured_requests = []
         
         # Common SSRF parameter names
         self.ssrf_param_names = [
@@ -203,7 +222,7 @@ class SSRFScanner(BaseScannerModule):
             return e, elapsed
     
     async def scan(self, config: ScanConfig) -> ScanResult:
-        """Perform SSRF vulnerability scan."""
+        """Perform SSRF vulnerability scan with intelligent discovery."""
         started_at = datetime.utcnow()
         vulnerabilities = []
         errors = []
@@ -216,6 +235,9 @@ class SSRFScanner(BaseScannerModule):
             'payloads_successful': [],
             'dangerous_tests_performed': False,
             'header_injection_tested': False,
+            'discovered_endpoints': [],
+            'captured_requests': [],
+            'browser_discovery_used': False,
         }
         statistics = {
             'urls_tested': 0,
@@ -226,6 +248,8 @@ class SSRFScanner(BaseScannerModule):
             'high_confidence': 0,
             'medium_confidence': 0,
             'low_confidence': 0,
+            'endpoints_discovered': 0,
+            'api_calls_captured': 0,
         }
         
         try:
@@ -243,6 +267,7 @@ class SSRFScanner(BaseScannerModule):
             enable_header_injection = config.custom_params.get('ssrf_header_injection', False)
             test_methods = config.custom_params.get('methods', ['GET'])
             canary_domain = config.custom_params.get('ssrf_canary_domain', '')
+            use_browser_discovery = config.custom_params.get('ssrf_browser_discovery', True)
             
             if enable_dangerous:
                 info['dangerous_tests_performed'] = True
@@ -254,63 +279,105 @@ class SSRFScanner(BaseScannerModule):
             # Get baseline response for comparison
             baseline = await self._get_baseline_response(target_url)
             
-            # Test based on scan type
-            if config.scan_type == ScanType.PASSIVE:
-                # Only check for obvious SSRF indicators without active testing
-                warnings.append("SSRF detection requires active scanning - passive mode limited")
-            else:
-                # 1. Test URL parameters for SSRF
-                param_results = await self._test_url_parameters(
-                    target_url, baseline, enable_dangerous, canary_domain, config
-                )
-                vulnerabilities.extend(param_results['vulnerabilities'])
-                info['tested_parameters'].extend(param_results['tested_params'])
-                statistics['parameters_tested'] = len(param_results['tested_params'])
+            # ============================================================
+            # PHASE 1: INTELLIGENT DISCOVERY 🕵️‍♂️
+            # ============================================================
+            if use_browser_discovery and PYPPETEER_AVAILABLE:
+                print(f"\n[Phase 1] Starting intelligent discovery with headless browser...")
+                info['browser_discovery_used'] = True
                 
-                # 2. Discover and test forms on the page
-                form_results = await self._discover_and_test_forms(
-                    target_url, baseline, enable_dangerous, canary_domain, config
+                discovery_results = await self._phase1_intelligent_discovery(
+                    target_url, config
                 )
-                vulnerabilities.extend(form_results['vulnerabilities'])
-                info['forms_tested'] = form_results['forms_tested']
-                statistics['forms_tested'] = len(form_results['forms_tested'])
-                statistics['parameters_tested'] += form_results['parameters_tested']
                 
-                # 3. Discover and test additional parameters
-                if config.scan_type == ScanType.AGGRESSIVE:
-                    discovery_results = await self._discover_and_test_parameters(
+                self.discovered_endpoints = discovery_results['endpoints']
+                self.captured_requests = discovery_results['captured_requests']
+                
+                info['discovered_endpoints'] = [
+                    {
+                        'url': ep['url'],
+                        'method': ep['method'],
+                        'type': ep.get('type', 'unknown')
+                    }
+                    for ep in self.discovered_endpoints
+                ]
+                info['captured_requests'] = len(self.captured_requests)
+                statistics['endpoints_discovered'] = len(self.discovered_endpoints)
+                statistics['api_calls_captured'] = len(self.captured_requests)
+                
+                print(f"[Phase 1] Discovered {len(self.discovered_endpoints)} endpoints")
+                print(f"[Phase 1] Captured {len(self.captured_requests)} API requests")
+            elif use_browser_discovery and not PYPPETEER_AVAILABLE:
+                warnings.append("Browser discovery requested but pyppeteer not available. Install with: pip install pyppeteer")
+                errors.append("pyppeteer not installed - falling back to traditional scanning")
+            
+            # ============================================================
+            # PHASE 2: CONTEXTUAL TESTING 🔬
+            # ============================================================
+            if self.captured_requests:
+                print(f"\n[Phase 2] Starting contextual testing with {len(self.captured_requests)} captured requests...")
+                
+                contextual_results = await self._phase2_contextual_testing(
+                    self.captured_requests, baseline, enable_dangerous, canary_domain, config
+                )
+                
+                vulnerabilities.extend(contextual_results['vulnerabilities'])
+                statistics['parameters_tested'] += contextual_results['parameters_tested']
+                statistics['payloads_tested'] += contextual_results['payloads_tested']
+                
+                print(f"[Phase 2] Found {len(contextual_results['vulnerabilities'])} vulnerabilities")
+            
+            # ============================================================
+            # PHASE 3: ADVANCED VERIFICATION ✅
+            # ============================================================
+            if canary_domain and vulnerabilities:
+                print(f"\n[Phase 3] Starting advanced verification with canary domain...")
+                
+                verification_results = await self._phase3_advanced_verification(
+                    vulnerabilities, canary_domain, config
+                )
+                
+                # Add confirmed vulnerabilities
+                vulnerabilities.extend(verification_results['confirmed_vulnerabilities'])
+                
+                print(f"[Phase 3] Confirmed {len(verification_results['confirmed_vulnerabilities'])} vulnerabilities via OOB")
+            
+            # Fallback to traditional scanning if no browser discovery
+            if not self.captured_requests:
+                print("\n[Fallback] Using traditional scanning methods...")
+                
+                if config.scan_type == ScanType.PASSIVE:
+                    warnings.append("SSRF detection requires active scanning - passive mode limited")
+                else:
+                    # Traditional URL parameter testing
+                    param_results = await self._test_url_parameters(
                         target_url, baseline, enable_dangerous, canary_domain, config
                     )
-                    vulnerabilities.extend(discovery_results['vulnerabilities'])
-                    info['tested_parameters'].extend(discovery_results['tested_params'])
-                    statistics['parameters_tested'] += len(discovery_results['tested_params'])
-                
-                # 4. Test POST parameters if enabled
-                if 'POST' in test_methods:
-                    post_results = await self._test_post_parameters(
+                    vulnerabilities.extend(param_results['vulnerabilities'])
+                    info['tested_parameters'].extend(param_results['tested_params'])
+                    statistics['parameters_tested'] = len(param_results['tested_params'])
+                    
+                    # Form discovery and testing
+                    form_results = await self._discover_and_test_forms(
                         target_url, baseline, enable_dangerous, canary_domain, config
                     )
-                    vulnerabilities.extend(post_results['vulnerabilities'])
-                
-                # 5. Test header-based SSRF if enabled
-                if enable_header_injection:
-                    header_results = await self._test_header_injection(
-                        target_url, baseline, enable_dangerous, config
+                    vulnerabilities.extend(form_results['vulnerabilities'])
+                    info['forms_tested'] = form_results['forms_tested']
+                    statistics['forms_tested'] = len(form_results['forms_tested'])
+                    statistics['parameters_tested'] += form_results['parameters_tested']
+                    
+                    # Header injection testing
+                    if enable_header_injection:
+                        header_results = await self._test_header_injection(
+                            target_url, baseline, enable_dangerous, config
+                        )
+                        vulnerabilities.extend(header_results)
+                    
+                    # Timing-based testing
+                    timing_results = await self._test_timing_based_ssrf(
+                        target_url, baseline, config
                     )
-                    vulnerabilities.extend(header_results)
-                
-                # 6. Test for blind SSRF with timing
-                timing_results = await self._test_timing_based_ssrf(
-                    target_url, baseline, config
-                )
-                vulnerabilities.extend(timing_results)
-                
-                # 7. Validate out-of-band interactions for DNS-based payloads
-                if canary_domain:
-                    oob_validation_results = await self._validate_oob_interactions(
-                        vulnerabilities, canary_domain, config
-                    )
-                    vulnerabilities.extend(oob_validation_results)
+                    vulnerabilities.extend(timing_results)
             
             # Update statistics
             statistics['vulnerabilities_found'] = len(vulnerabilities)
@@ -1146,6 +1213,26 @@ class SSRFScanner(BaseScannerModule):
                     vuln.evidence['unique_subdomain'] = unique_subdomain
         
         return oob_vulnerabilities
+    
+    async def _phase1_intelligent_discovery(self, target_url: str, config: ScanConfig) -> Dict[str, Any]:
+        """Phase 1: Intelligent Discovery using headless browser."""
+        from .ssrf_scanner_phases import phase1_intelligent_discovery
+        return await phase1_intelligent_discovery(target_url, config)
+    
+    async def _phase2_contextual_testing(self, captured_requests: List[Dict], baseline: Dict[str, Any],
+                                        enable_dangerous: bool, canary_domain: str,
+                                        config: ScanConfig) -> Dict[str, Any]:
+        """Phase 2: Contextual Testing with captured API requests."""
+        from .ssrf_scanner_phases import phase2_contextual_testing
+        return await phase2_contextual_testing(
+            captured_requests, baseline, enable_dangerous, canary_domain, config, self
+        )
+    
+    async def _phase3_advanced_verification(self, vulnerabilities: List[Vulnerability],
+                                           canary_domain: str, config: ScanConfig) -> Dict[str, Any]:
+        """Phase 3: Advanced Verification with OOB detection."""
+        from .ssrf_scanner_phases import phase3_advanced_verification
+        return await phase3_advanced_verification(vulnerabilities, canary_domain, config)
     
     def _extract_subdomain_from_payload(self, payload: str) -> Optional[str]:
         """Extract the unique subdomain from a DNS OOB payload."""

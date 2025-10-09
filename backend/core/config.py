@@ -94,6 +94,19 @@ class Settings(BaseSettings):
     scan_results_dir: Path = Field(default=Path("./scan_results"), env="SCAN_RESULTS_DIR")
     log_dir: Path = Field(default=Path("./logs"), env="LOG_DIR")
     
+    # Authentication Scanner Configuration
+    enable_auth_bruteforce_testing: bool = Field(default=False, env="ENABLE_AUTH_BRUTEFORCE_TESTING")
+    auth_bruteforce_max_attempts: int = Field(default=50, env="AUTH_BRUTEFORCE_MAX_ATTEMPTS")
+    auth_bruteforce_wordlist_path: Optional[str] = Field(default=None, env="AUTH_BRUTEFORCE_WORDLIST_PATH")
+    auth_rate_limit_threshold_rps: int = Field(default=5, env="AUTH_RATE_LIMIT_THRESHOLD_RPS")
+    auth_username_enum_sensitivity: float = Field(default=0.15, env="AUTH_USERNAME_ENUM_SENSITIVITY")
+    auth_idle_timeout_seconds: int = Field(default=120, env="AUTH_IDLE_TIMEOUT_SECONDS")
+    auth_common_logout_paths: List[str] = Field(
+        default=["/logout", "/signout", "/sign-out", "/api/auth/logout", "/api/logout", "/auth/logout"],
+        env="AUTH_COMMON_LOGOUT_PATHS"
+    )
+    use_lm_studio_analyzer: bool = Field(default=True, env="USE_LM_STUDIO_ANALYZER")
+    
     # Feature Flags
     enable_authenticated_scanning: bool = Field(default=True, env="ENABLE_AUTHENTICATED_SCANNING")
     enable_injection_testing: bool = Field(default=False, env="ENABLE_INJECTION_TESTING")
